@@ -22,8 +22,8 @@ use zip::ZipArchive;
 use crate::s3::{build_s3_client, ensure_bucket, S3Settings};
 
 #[derive(Debug, Args)]
-pub struct ImportDailyZipArgs {
-    #[arg(long, default_value = "日线数据", help = "包含 zip 文件的目录")]
+pub struct ImportDailyArgs {
+    #[arg(long, default_value = "日线数据", help = "包含 zip 或 csv 文件的目录")]
     pub input_dir: PathBuf,
 
     #[arg(long, env = "S3_BUCKET", default_value = "stock")]
@@ -42,7 +42,7 @@ pub struct ImportDailyZipArgs {
     pub s3_host: Option<String>,
 }
 
-pub async fn run_import_daily_zip(args: ImportDailyZipArgs) -> Result<()> {
+pub async fn run_import_daily(args: ImportDailyArgs) -> Result<()> {
     let s3_host = args
         .s3_host
         .or_else(|| env_var_any(&["S3_HOST", "s3_host"]))
@@ -61,23 +61,26 @@ pub async fn run_import_daily_zip(args: ImportDailyZipArgs) -> Result<()> {
         .await
         .with_context(|| format!("ensure bucket {} failed", s3_settings.bucket))?;
 
-    let zip_files = collect_zip_files(&args.input_dir)?;
-    if zip_files.is_empty() {
-        return Err(anyhow!("目录中未找到 zip 文件: {}", args.input_dir.display()));
+    let source_files = collect_source_files(&args.input_dir)?;
+    if source_files.is_empty() {
+        return Err(anyhow!(
+            "目录中未找到 zip 或 csv 文件: {}",
+            args.input_dir.display()
+        ));
     }
 
     println!(
-        "[INFO] 开始导入: {} 个 zip 文件, input_dir={}",
-        zip_files.len(),
+        "[INFO] 开始导入: {} 个源文件(zip/csv), input_dir={}",
+        source_files.len(),
         args.input_dir.display()
     );
 
     let mut total_rows = 0usize;
     let mut total_partitions = 0usize;
 
-    for (idx, zip_path) in zip_files.iter().enumerate() {
-        let partitions = parse_zip_to_partitions(zip_path)
-            .with_context(|| format!("解析 zip 失败: {}", zip_path.display()))?;
+    for (idx, source_path) in source_files.iter().enumerate() {
+        let partitions = parse_source_to_partitions(source_path)
+            .with_context(|| format!("解析源文件失败: {}", source_path.display()))?;
 
         let mut uploaded = 0usize;
         for ((exchange, year, month), rows) in partitions {
@@ -95,11 +98,11 @@ pub async fn run_import_daily_zip(args: ImportDailyZipArgs) -> Result<()> {
             .await
             .with_context(|| {
                 format!(
-                    "上传分区失败: exchange={}, year={}, month={}, zip={}",
+                    "上传分区失败: exchange={}, year={}, month={}, source={}",
                     exchange,
                     year,
                     month,
-                    zip_path.display()
+                    source_path.display()
                 )
             })?;
             total_rows += rows.len();
@@ -108,10 +111,10 @@ pub async fn run_import_daily_zip(args: ImportDailyZipArgs) -> Result<()> {
         }
 
         println!(
-            "[ZIP] {}/{} 完成: {}, 上传 {} 个分区",
+            "[FILE] {}/{} 完成: {}, 上传 {} 个分区",
             idx + 1,
-            zip_files.len(),
-            zip_path.display(),
+            source_files.len(),
+            source_path.display(),
             uploaded
         );
     }
@@ -124,7 +127,7 @@ pub async fn run_import_daily_zip(args: ImportDailyZipArgs) -> Result<()> {
     Ok(())
 }
 
-fn collect_zip_files(input_dir: &Path) -> Result<Vec<PathBuf>> {
+fn collect_source_files(input_dir: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     for entry in std::fs::read_dir(input_dir)
         .with_context(|| format!("读取目录失败: {}", input_dir.display()))?
@@ -134,13 +137,33 @@ fn collect_zip_files(input_dir: &Path) -> Result<Vec<PathBuf>> {
         if path
             .extension()
             .and_then(|s| s.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+            .is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("zip") || ext.eq_ignore_ascii_case("csv")
+            })
         {
             files.push(path);
         }
     }
     files.sort();
     Ok(files)
+}
+
+fn parse_source_to_partitions(
+    source_path: &Path,
+) -> Result<BTreeMap<(String, String, String), Vec<CsvDailyRow>>> {
+    let ext = source_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow!("无法识别文件扩展名: {}", source_path.display()))?;
+
+    if ext.eq_ignore_ascii_case("zip") {
+        return parse_zip_to_partitions(source_path);
+    }
+    if ext.eq_ignore_ascii_case("csv") {
+        return parse_csv_to_partitions(source_path);
+    }
+
+    Err(anyhow!("不支持的文件类型: {}", source_path.display()))
 }
 
 fn parse_zip_to_partitions(
@@ -180,11 +203,34 @@ fn parse_zip_to_partitions(
                     .unwrap_or_default();
                 let year = bar.time[0..4].to_string();
                 let month = bar.time[5..7].to_string();
-                groups
-                    .entry((exchange, year, month))
-                    .or_default()
-                    .push(bar);
+                groups.entry((exchange, year, month)).or_default().push(bar);
             }
+        }
+    }
+
+    Ok(groups)
+}
+
+fn parse_csv_to_partitions(
+    csv_path: &Path,
+) -> Result<BTreeMap<(String, String, String), Vec<CsvDailyRow>>> {
+    let mut groups: BTreeMap<(String, String, String), Vec<CsvDailyRow>> = BTreeMap::new();
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(File::open(csv_path)?);
+
+    for row in reader.records() {
+        let row = row?;
+        if let Some(bar) = parse_daily_bar_row(&row) {
+            let exchange = bar
+                .symbol
+                .split('.')
+                .nth(1)
+                .map(|x| x.to_string())
+                .unwrap_or_default();
+            let year = bar.time[0..4].to_string();
+            let month = bar.time[5..7].to_string();
+            groups.entry((exchange, year, month)).or_default().push(bar);
         }
     }
 
@@ -274,8 +320,9 @@ async fn upload_daily_partition_file_csv_full(
     rows: &[CsvDailyRow],
 ) -> Result<()> {
     let parquet_bytes = to_parquet_bytes_csv_full(rows)?;
-    let key =
-        format!("curated/daily_bars/exchange={exchange}/year={year}/month={month}/data.parquet");
+    let key = format!(
+        "stock/curated/daily_bars/exchange={exchange}/year={year}/month={month}/data.parquet"
+    );
     let body = SegmentedBytes::from(Bytes::from(parquet_bytes));
     s3.put_object(bucket, &key, body).send().await?;
     Ok(())

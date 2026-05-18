@@ -22,7 +22,7 @@ use zip::ZipArchive;
 use crate::s3::{build_s3_client, ensure_bucket, S3Client, S3Settings};
 
 #[derive(Debug, Args)]
-pub struct ImportMinuteZipArgs {
+pub struct ImportMinuteArgs {
     #[arg(long, help = "分钟 zip 根目录")]
     pub input_dir: PathBuf,
 
@@ -69,7 +69,7 @@ struct MinuteRow {
     is_paused: Option<f64>,
 }
 
-pub async fn run_import_minute_zip(args: ImportMinuteZipArgs) -> Result<()> {
+pub async fn run_import_minute(args: ImportMinuteArgs) -> Result<()> {
     if args.part_size == 0 {
         return Err(anyhow!("--part-size 必须大于 0"));
     }
@@ -123,7 +123,6 @@ pub async fn run_import_minute_zip(args: ImportMinuteZipArgs) -> Result<()> {
             continue;
         }
 
-        let source_id = zip_source_id(zip_path, &args.input_dir);
         let (groups, zip_rows) = parse_zip_groups(zip_path)
             .with_context(|| format!("解析 zip 失败: {}", zip_path.display()))?;
         scanned_rows += zip_rows;
@@ -140,15 +139,14 @@ pub async fn run_import_minute_zip(args: ImportMinuteZipArgs) -> Result<()> {
                     &s3_settings.bucket,
                     &trade_date,
                     &exchange,
-                    &source_id,
                     part_idx,
                     chunk,
                 )
                 .await
                 .with_context(|| {
                     format!(
-                        "上传分区失败: trade_date={}, exchange={}, source={}, part={}",
-                        trade_date, exchange, source_id, part_idx
+                        "上传分区失败: trade_date={}, exchange={}, part={}",
+                        trade_date, exchange, part_idx
                     )
                 })?;
                 zip_written_rows += chunk.len();
@@ -295,13 +293,12 @@ async fn upload_minute_part(
     bucket: &str,
     trade_date: &str,
     exchange: &str,
-    source_id: &str,
     part_idx: usize,
     rows: &[MinuteRow],
 ) -> Result<()> {
     let parquet_bytes = to_parquet_bytes(rows)?;
     let key = format!(
-        "curated/minute_bars_1m/trade_date={trade_date}/exchange={exchange}/source={source_id}/part-{part_idx:03}.parquet"
+        "curated/minute_bars_1m/trade_date={trade_date}/exchange={exchange}/part-{part_idx:03}.parquet"
     );
     let body = SegmentedBytes::from(Bytes::from(parquet_bytes));
     s3.put_object(bucket, &key, body).send().await?;
@@ -387,15 +384,6 @@ fn to_parquet_bytes(rows: &[MinuteRow]) -> Result<Vec<u8>> {
     Ok(cursor.into_inner())
 }
 
-fn zip_source_id(zip_path: &Path, input_dir: &Path) -> String {
-    let relative = zip_path
-        .strip_prefix(input_dir)
-        .unwrap_or(zip_path)
-        .to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "_");
-    sanitize_for_s3_component(&relative)
-}
-
 fn zip_manifest_key(zip_path: &Path, input_dir: &Path) -> Result<String> {
     let meta = std::fs::metadata(zip_path)?;
     let size = meta.len();
@@ -410,21 +398,6 @@ fn zip_manifest_key(zip_path: &Path, input_dir: &Path) -> Result<String> {
         .unwrap_or(zip_path)
         .to_string_lossy();
     Ok(format!("{}\t{}\t{}", relative, size, mtime_secs))
-}
-
-fn sanitize_for_s3_component(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for c in input.chars() {
-        if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-            out.push(c);
-        } else {
-            out.push('_');
-        }
-    }
-    while out.contains("__") {
-        out = out.replace("__", "_");
-    }
-    out.trim_matches('_').to_string()
 }
 
 fn load_manifest(path: &Path) -> Result<BTreeSet<String>> {
@@ -468,4 +441,3 @@ fn env_var_any(keys: &[&str]) -> Option<String> {
     }
     None
 }
-

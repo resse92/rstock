@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use chrono::Utc;
 use serde::Serialize;
-use serde_json::Value;
 
 use crate::models::{date_from_ts_raw, DailyBar, MinuteBar1m, NormalizedBar};
 
@@ -18,10 +17,6 @@ pub struct SwanLakeConfig {
 impl SwanLakeConfig {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
-    }
-
-    pub fn raw_root(&self) -> PathBuf {
-        self.root.join("raw")
     }
 
     pub fn curated_root(&self) -> PathBuf {
@@ -37,26 +32,6 @@ pub struct SwanLakeSink {
 impl SwanLakeSink {
     pub fn new(cfg: SwanLakeConfig) -> Self {
         Self { cfg }
-    }
-
-    pub fn write_raw_batch(
-        &self,
-        vendor: &str,
-        data_type: &str,
-        trade_date: &str,
-        batch_no: usize,
-        payload: &Value,
-    ) -> Result<PathBuf> {
-        let dir = self
-            .cfg
-            .raw_root()
-            .join(format!("vendor={vendor}"))
-            .join(format!("type={data_type}"))
-            .join(format!("trade_date={trade_date}"));
-        fs::create_dir_all(&dir)?;
-        let file_path = dir.join(format!("batch_{batch_no:05}.json"));
-        fs::write(&file_path, serde_json::to_vec_pretty(payload)?)?;
-        Ok(file_path)
     }
 
     pub fn write_daily_bars(&self, bars: &[DailyBar]) -> Result<Vec<PathBuf>> {
@@ -116,7 +91,10 @@ impl SwanLakeSink {
         Ok(outputs)
     }
 
-    pub fn write_normalized_bars(&self, bars: &[NormalizedBar]) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+    pub fn write_normalized_bars(
+        &self,
+        bars: &[NormalizedBar],
+    ) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
         let daily: Vec<DailyBar> = bars.iter().filter_map(DailyBar::from_normalized).collect();
         let minute: Vec<MinuteBar1m> = bars
             .iter()

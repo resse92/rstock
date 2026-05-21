@@ -25,15 +25,13 @@
 
 ```text
 s3://stock-lake/
-  raw/
   curated/
   meta/
 ```
 
-推荐分三层：
+推荐分两层：
 
 ```text
-raw/       原始抓取结果，保留回放能力
 curated/   清洗后的标准 Parquet，给查询用
 meta/      元数据、更新水位、错误日志
 ```
@@ -188,22 +186,13 @@ symbol, time
 
 ---
 
-# 四、raw 层怎么放
+# 四、不单独保留 raw 层
 
-raw 层不要追求优雅，追求“可回放、可追责”。
+当前阶段不单独落 raw。导入任务直接把本地 zip/csv 或 API 结果标准化后写入 `curated/`。
 
-例如：
+这样目录更简单，也避免同一批历史数据在对象存储里重复占空间。
 
-```text
-raw/vendor=tushare/type=daily/trade_date=2026-03-20/batch_001.json
-raw/vendor=tushare/type=minute/trade_date=2026-03-20/batch_001.parquet
-```
-
-raw 层作用：
-
-- 数据源出错时可重跑
-- 清洗逻辑变更时可重建 curated
-- 保留原始字段
+如果后续不再保存原始 zip/csv，或者需要审计、回放、对比多数据源，再单独增加 raw 层。
 
 ---
 
@@ -213,7 +202,6 @@ raw 层作用：
 
 ```text
 抓取当天数据
-→ 落 raw
 → 清洗标准化
 → 写入 curated 当日分区
 → 记录水位
@@ -483,7 +471,6 @@ s3://stock-lake/meta/watermark/part-000.parquet
 
 **写入策略**
 
-- raw 先落
 - curated 按分区批量重写/追加
 - 去重键统一 `symbol,time`
 - 不按 symbol 分区

@@ -98,7 +98,7 @@ pub async fn run_import_daily(args: ImportDailyArgs) -> Result<()> {
             .await
             .with_context(|| {
                 format!(
-                    "上传分区失败: exchange={}, year={}, month={}, source={}",
+                    "上传分区失败: exchange={}, year={}, month={}, file={}",
                     exchange,
                     year,
                     month,
@@ -137,9 +137,7 @@ fn collect_source_files(input_dir: &Path) -> Result<Vec<PathBuf>> {
         if path
             .extension()
             .and_then(|s| s.to_str())
-            .is_some_and(|ext| {
-                ext.eq_ignore_ascii_case("zip") || ext.eq_ignore_ascii_case("csv")
-            })
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("zip") || ext.eq_ignore_ascii_case("csv"))
         {
             files.push(path);
         }
@@ -320,9 +318,8 @@ async fn upload_daily_partition_file_csv_full(
     rows: &[CsvDailyRow],
 ) -> Result<()> {
     let parquet_bytes = to_parquet_bytes_csv_full(rows)?;
-    let key = format!(
-        "stock/curated/daily_bars/exchange={exchange}/year={year}/month={month}/data.parquet"
-    );
+    let key =
+        format!("curated/daily_bars/exchange={exchange}/year={year}/month={month}/data.parquet");
     let body = SegmentedBytes::from(Bytes::from(parquet_bytes));
     s3.put_object(bucket, &key, body).send().await?;
     Ok(())

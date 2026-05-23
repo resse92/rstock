@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -16,6 +16,7 @@ use minio::s3::types::S3Api;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
+use tokio::task::JoinSet;
 use zip::ZipArchive;
 
 use crate::s3::{build_s3_client, ensure_bucket, S3Client, S3Settings};
@@ -27,6 +28,9 @@ pub struct ImportMinuteArgs {
 
     #[arg(long, default_value_t = 200_000, help = "每个 parquet part 最大行数")]
     pub part_size: usize,
+
+    #[arg(long, default_value_t = 4, help = "并发上传 parquet part 数")]
+    pub upload_concurrency: usize,
 
     #[arg(
         long,
@@ -71,6 +75,9 @@ struct MinuteRow {
 pub async fn run_import_minute(args: ImportMinuteArgs) -> Result<()> {
     if args.part_size == 0 {
         return Err(anyhow!("--part-size 必须大于 0"));
+    }
+    if args.upload_concurrency == 0 {
+        return Err(anyhow!("--upload-concurrency 必须大于 0"));
     }
 
     let s3_host = args
@@ -118,40 +125,17 @@ pub async fn run_import_minute(args: ImportMinuteArgs) -> Result<()> {
             continue;
         }
 
-        let (groups, source_rows) = parse_source_groups(path)
-            .with_context(|| format!("解析文件失败: {}", path.display()))?;
+        let (source_rows, source_written_rows, source_parts) = process_source(
+            path,
+            args.part_size,
+            args.upload_concurrency,
+            &s3,
+            &s3_settings.bucket,
+            &mut next_part_by_partition,
+        )
+        .await
+        .with_context(|| format!("解析/上传文件失败: {}", path.display()))?;
         scanned_rows += source_rows;
-        let mut source_written_rows = 0usize;
-        let mut source_parts = 0usize;
-
-        for ((trade_date, exchange), rows) in groups {
-            let mut deduped = dedup_rows(rows);
-            deduped.sort_by(|a, b| a.symbol.cmp(&b.symbol).then(a.time.cmp(&b.time)));
-            for chunk in deduped.chunks(args.part_size) {
-                let next_part = next_part_by_partition
-                    .entry((trade_date.clone(), exchange.clone()))
-                    .or_default();
-                let key = upload_minute_part(
-                    &s3,
-                    &s3_settings.bucket,
-                    &trade_date,
-                    &exchange,
-                    *next_part,
-                    chunk,
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "上传分区失败: trade_date={}, exchange={}, part={}",
-                        trade_date, exchange, next_part
-                    )
-                })?;
-                *next_part += 1;
-                source_written_rows += chunk.len();
-                source_parts += 1;
-                println!("[PUT] {key} rows={}", chunk.len());
-            }
-        }
 
         append_manifest_line(&args.manifest_file, &manifest_key)?;
         imported.insert(manifest_key);
@@ -208,38 +192,88 @@ fn collect_input_files_recursive(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn parse_source_groups(path: &Path) -> Result<(BTreeMap<(String, String), Vec<MinuteRow>>, usize)> {
+async fn process_source(
+    path: &Path,
+    part_size: usize,
+    upload_concurrency: usize,
+    s3: &S3Client,
+    bucket: &str,
+    next_part_by_partition: &mut BTreeMap<(String, String), usize>,
+) -> Result<(usize, usize, usize)> {
+    let mut buffers: BTreeMap<(String, String), Vec<MinuteRow>> = BTreeMap::new();
+    let mut uploads = JoinSet::new();
+    let mut scanned_rows = 0usize;
+    let mut written_rows = 0usize;
+    let mut part_files = 0usize;
+
     match path.extension().and_then(|s| s.to_str()) {
-        Some(ext) if ext.eq_ignore_ascii_case("zip") => parse_zip_groups(path),
-        Some(ext) if ext.eq_ignore_ascii_case("csv") => parse_csv_groups(path),
-        _ => Err(anyhow!("不支持的文件类型: {}", path.display())),
-    }
-}
-
-fn parse_csv_groups(path: &Path) -> Result<(BTreeMap<(String, String), Vec<MinuteRow>>, usize)> {
-    let file = std::fs::File::open(path)?;
-    let mut reader = csv::ReaderBuilder::new().has_headers(true).from_reader(file);
-    let mut groups: BTreeMap<(String, String), Vec<MinuteRow>> = BTreeMap::new();
-    let mut row_count = 0usize;
-
-    for record in reader.records() {
-        if let Some(row) = parse_minute_row(&record?) {
-            groups
-                .entry((row.trade_date.clone(), row.exchange.clone()))
-                .or_default()
-                .push(row);
-            row_count += 1;
+        Some(ext) if ext.eq_ignore_ascii_case("zip") => {
+            process_zip(
+                path,
+                part_size,
+                upload_concurrency,
+                s3,
+                bucket,
+                next_part_by_partition,
+                &mut buffers,
+                &mut uploads,
+                &mut scanned_rows,
+                &mut written_rows,
+                &mut part_files,
+            )
+            .await?;
         }
+        Some(ext) if ext.eq_ignore_ascii_case("csv") => {
+            let file = std::fs::File::open(path)?;
+            process_csv_reader(
+                file,
+                part_size,
+                upload_concurrency,
+                s3,
+                bucket,
+                next_part_by_partition,
+                &mut buffers,
+                &mut uploads,
+                &mut scanned_rows,
+                &mut written_rows,
+                &mut part_files,
+            )
+            .await?;
+        }
+        _ => return Err(anyhow!("不支持的文件类型: {}", path.display())),
     }
 
-    Ok((groups, row_count))
+    flush_all_buffers(
+        s3,
+        bucket,
+        upload_concurrency,
+        next_part_by_partition,
+        &mut buffers,
+        &mut uploads,
+        &mut written_rows,
+        &mut part_files,
+    )
+    .await?;
+    drain_uploads(&mut uploads, &mut written_rows, &mut part_files).await?;
+
+    Ok((scanned_rows, written_rows, part_files))
 }
 
-fn parse_zip_groups(path: &Path) -> Result<(BTreeMap<(String, String), Vec<MinuteRow>>, usize)> {
+async fn process_zip(
+    path: &Path,
+    part_size: usize,
+    upload_concurrency: usize,
+    s3: &S3Client,
+    bucket: &str,
+    next_part_by_partition: &mut BTreeMap<(String, String), usize>,
+    buffers: &mut BTreeMap<(String, String), Vec<MinuteRow>>,
+    uploads: &mut JoinSet<Result<(String, usize)>>,
+    scanned_rows: &mut usize,
+    written_rows: &mut usize,
+    part_files: &mut usize,
+) -> Result<()> {
     let file = std::fs::File::open(path)?;
     let mut archive = ZipArchive::new(file)?;
-    let mut groups: BTreeMap<(String, String), Vec<MinuteRow>> = BTreeMap::new();
-    let mut row_count = 0usize;
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
@@ -258,16 +292,194 @@ fn parse_zip_groups(path: &Path) -> Result<(BTreeMap<(String, String), Vec<Minut
             .from_reader(&mut entry);
         for record in reader.records() {
             if let Some(row) = parse_minute_row(&record?) {
-                groups
-                    .entry((row.trade_date.clone(), row.exchange.clone()))
-                    .or_default()
-                    .push(row);
-                row_count += 1;
+                push_row(
+                    row,
+                    part_size,
+                    upload_concurrency,
+                    s3,
+                    bucket,
+                    next_part_by_partition,
+                    buffers,
+                    uploads,
+                    written_rows,
+                    part_files,
+                )
+                .await?;
+                *scanned_rows += 1;
             }
         }
     }
 
-    Ok((groups, row_count))
+    Ok(())
+}
+
+async fn process_csv_reader<R: Read>(
+    reader: R,
+    part_size: usize,
+    upload_concurrency: usize,
+    s3: &S3Client,
+    bucket: &str,
+    next_part_by_partition: &mut BTreeMap<(String, String), usize>,
+    buffers: &mut BTreeMap<(String, String), Vec<MinuteRow>>,
+    uploads: &mut JoinSet<Result<(String, usize)>>,
+    scanned_rows: &mut usize,
+    written_rows: &mut usize,
+    part_files: &mut usize,
+) -> Result<()> {
+    let mut reader = csv::ReaderBuilder::new().has_headers(true).from_reader(reader);
+    for record in reader.records() {
+        if let Some(row) = parse_minute_row(&record?) {
+            push_row(
+                row,
+                part_size,
+                upload_concurrency,
+                s3,
+                bucket,
+                next_part_by_partition,
+                buffers,
+                uploads,
+                written_rows,
+                part_files,
+            )
+            .await?;
+            *scanned_rows += 1;
+        }
+    }
+    Ok(())
+}
+
+async fn push_row(
+    row: MinuteRow,
+    part_size: usize,
+    upload_concurrency: usize,
+    s3: &S3Client,
+    bucket: &str,
+    next_part_by_partition: &mut BTreeMap<(String, String), usize>,
+    buffers: &mut BTreeMap<(String, String), Vec<MinuteRow>>,
+    uploads: &mut JoinSet<Result<(String, usize)>>,
+    written_rows: &mut usize,
+    part_files: &mut usize,
+) -> Result<()> {
+    let key = (row.trade_date.clone(), row.exchange.clone());
+    let buffer = buffers.entry(key.clone()).or_default();
+    buffer.push(row);
+    if buffer.len() >= part_size {
+        let rows = std::mem::take(buffer);
+        flush_rows(
+            s3,
+            bucket,
+            upload_concurrency,
+            next_part_by_partition,
+            key,
+            rows,
+            uploads,
+            written_rows,
+            part_files,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn flush_all_buffers(
+    s3: &S3Client,
+    bucket: &str,
+    upload_concurrency: usize,
+    next_part_by_partition: &mut BTreeMap<(String, String), usize>,
+    buffers: &mut BTreeMap<(String, String), Vec<MinuteRow>>,
+    uploads: &mut JoinSet<Result<(String, usize)>>,
+    written_rows: &mut usize,
+    part_files: &mut usize,
+) -> Result<()> {
+    let pending = std::mem::take(buffers);
+    for (key, rows) in pending {
+        flush_rows(
+            s3,
+            bucket,
+            upload_concurrency,
+            next_part_by_partition,
+            key,
+            rows,
+            uploads,
+            written_rows,
+            part_files,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn flush_rows(
+    s3: &S3Client,
+    bucket: &str,
+    upload_concurrency: usize,
+    next_part_by_partition: &mut BTreeMap<(String, String), usize>,
+    key: (String, String),
+    rows: Vec<MinuteRow>,
+    uploads: &mut JoinSet<Result<(String, usize)>>,
+    written_rows: &mut usize,
+    part_files: &mut usize,
+) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let (trade_date, exchange) = key;
+    let mut deduped = dedup_rows(rows);
+    deduped.sort_by(|a, b| a.symbol.cmp(&b.symbol).then(a.time.cmp(&b.time)));
+    let next_part = next_part_by_partition
+        .entry((trade_date.clone(), exchange.clone()))
+        .or_default();
+    let part_idx = *next_part;
+    *next_part += 1;
+
+    while uploads.len() >= upload_concurrency {
+        wait_one_upload(uploads, written_rows, part_files).await?;
+    }
+
+    let s3 = s3.clone();
+    let bucket = bucket.to_string();
+    uploads.spawn(async move {
+        upload_minute_part_owned(s3, bucket, trade_date, exchange, part_idx, deduped).await
+    });
+    Ok(())
+}
+
+async fn wait_one_upload(
+    uploads: &mut JoinSet<Result<(String, usize)>>,
+    written_rows: &mut usize,
+    part_files: &mut usize,
+) -> Result<()> {
+    if let Some(result) = uploads.join_next().await {
+        let (key, rows) = result??;
+        *written_rows += rows;
+        *part_files += 1;
+        println!("[PUT] {key} rows={rows}");
+    }
+    Ok(())
+}
+
+async fn drain_uploads(
+    uploads: &mut JoinSet<Result<(String, usize)>>,
+    written_rows: &mut usize,
+    part_files: &mut usize,
+) -> Result<()> {
+    while !uploads.is_empty() {
+        wait_one_upload(uploads, written_rows, part_files).await?;
+    }
+    Ok(())
+}
+
+async fn upload_minute_part_owned(
+    s3: S3Client,
+    bucket: String,
+    trade_date: String,
+    exchange: String,
+    part_idx: usize,
+    rows: Vec<MinuteRow>,
+) -> Result<(String, usize)> {
+    let row_count = rows.len();
+    let key = upload_minute_part(&s3, &bucket, &trade_date, &exchange, part_idx, &rows).await?;
+    Ok((key, row_count))
 }
 
 fn parse_minute_row(row: &StringRecord) -> Option<MinuteRow> {

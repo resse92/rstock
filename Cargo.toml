@@ -1,7 +1,14 @@
 [package]
-name = "rust_kline_fetcher"
+name = "rstock"
 version = "0.1.0"
 edition = "2021"
+
+[workspace]
+members = ["tools/zip-csv-to-parquet"]
+
+[[bin]]
+name = "rstock"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"

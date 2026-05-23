@@ -100,10 +100,18 @@ fn normalize_bar(stock_code: &str, period: &str, obj: &Map<String, Value>) -> No
         volume: to_opt_f64(pick(obj, &["volume", "vol", "v"])),
         amount: to_opt_f64(pick(obj, &["amount", "amt", "turnover", "value"])),
         turnover_rate: to_opt_f64(pick(obj, &["turnover_rate", "turnrate"])),
-        open_interest: to_opt_f64(pick(obj, &["open_interest", "openInterest", "openInt", "oi"])),
+        open_interest: to_opt_f64(pick(
+            obj,
+            &["open_interest", "openInterest", "openInt", "oi"],
+        )),
         settle: to_opt_f64(pick(
             obj,
-            &["settle", "settlement", "settle_price", "lastSettlementPrice"],
+            &[
+                "settle",
+                "settlement",
+                "settle_price",
+                "lastSettlementPrice",
+            ],
         )),
         adj_factor: to_opt_f64(pick(obj, &["adj_factor", "factor"])),
         extra_json: if extra.is_empty() {
@@ -114,7 +122,11 @@ fn normalize_bar(stock_code: &str, period: &str, obj: &Map<String, Value>) -> No
     }
 }
 
-fn rows_from_dict_of_arrays(stock_code: &str, period: &str, payload: &Map<String, Value>) -> Vec<NormalizedBar> {
+fn rows_from_dict_of_arrays(
+    stock_code: &str,
+    period: &str,
+    payload: &Map<String, Value>,
+) -> Vec<NormalizedBar> {
     let series_keys = [
         "time",
         "timestamp",
@@ -185,7 +197,10 @@ fn extract_rows_for_stock(stock_code: &str, period: &str, payload: &Value) -> Ve
                 }
             }
 
-            if ["open", "high", "low", "close"].iter().any(|k| obj.contains_key(*k)) {
+            if ["open", "high", "low", "close"]
+                .iter()
+                .any(|k| obj.contains_key(*k))
+            {
                 return vec![normalize_bar(stock_code, period, obj)];
             }
             vec![]

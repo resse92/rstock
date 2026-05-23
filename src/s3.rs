@@ -12,8 +12,8 @@ use minio::s3::creds::StaticProvider;
 use minio::s3::http::BaseUrl;
 use minio::s3::segmented_bytes::SegmentedBytes;
 use minio::s3::types::S3Api;
-use parquet::basic::Compression;
 use parquet::arrow::ArrowWriter;
+use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
 use crate::models::DailyBar;
@@ -42,9 +42,7 @@ pub async fn build_s3_client(settings: &S3Settings) -> Result<S3Client> {
         _ => None,
     };
 
-    let client = ClientBuilder::new(base_url)
-        .provider(provider)
-        .build()?;
+    let client = ClientBuilder::new(base_url).provider(provider).build()?;
 
     Ok(client)
 }
@@ -83,15 +81,9 @@ pub async fn upload_daily_bars_partitions(
 
     let mut uploaded_keys = Vec::new();
     for ((exchange, year, month), chunk) in groups {
-        let key = upload_daily_partition_file(
-            s3,
-            &settings.bucket,
-            &exchange,
-            &year,
-            &month,
-            &chunk,
-        )
-        .await?;
+        let key =
+            upload_daily_partition_file(s3, &settings.bucket, &exchange, &year, &month, &chunk)
+                .await?;
         uploaded_keys.push(key);
     }
 

@@ -128,8 +128,7 @@ pub fn exchange_from_symbol(symbol: &str) -> Option<String> {
 
 pub fn date_from_ts_raw(ts_raw: &str) -> Option<String> {
     let s = ts_raw.trim();
-    if s.len() >= 10 && s.as_bytes().get(4) == Some(&b'-') && s.as_bytes().get(7) == Some(&b'-')
-    {
+    if s.len() >= 10 && s.as_bytes().get(4) == Some(&b'-') && s.as_bytes().get(7) == Some(&b'-') {
         return Some(s[..10].to_string());
     }
     if s.len() >= 8 && s.chars().take(8).all(|c| c.is_ascii_digit()) {

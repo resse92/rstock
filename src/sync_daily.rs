@@ -265,7 +265,11 @@ pub async fn run_sync_daily(args: SyncDailyArgs) -> Result<()> {
                             batch_bars.push(bar);
                         }
                     }
-                    Ok::<(usize, usize, Vec<DailyBar>), anyhow::Error>((batch_no, rows.len(), batch_bars))
+                    Ok::<(usize, usize, Vec<DailyBar>), anyhow::Error>((
+                        batch_no,
+                        rows.len(),
+                        batch_bars,
+                    ))
                 });
                 next_batch_idx += 1;
             }
@@ -355,8 +359,8 @@ fn read_watermark_day(path: &PathBuf) -> Result<Option<NaiveDate>> {
     if !path.exists() {
         return Ok(None);
     }
-    let raw =
-        fs::read_to_string(path).with_context(|| format!("读取 watermark 失败: {}", path.display()))?;
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("读取 watermark 失败: {}", path.display()))?;
     let val = raw.trim();
     if val.is_empty() {
         return Ok(None);
@@ -386,7 +390,9 @@ fn compact_date(input: &str) -> Result<String> {
             return Ok(out);
         }
     }
-    Err(anyhow!("无效日期格式: {input}，应为 YYYY-MM-DD 或 YYYYMMDD"))
+    Err(anyhow!(
+        "无效日期格式: {input}，应为 YYYY-MM-DD 或 YYYYMMDD"
+    ))
 }
 
 fn env_var_any(keys: &[&str]) -> Option<String> {
@@ -413,7 +419,9 @@ fn month_windows(start_compact: &str, end_compact: &str) -> Result<Vec<(String, 
     let start = parse_compact_date(start_compact)?;
     let end = parse_compact_date(end_compact)?;
     if start > end {
-        return Err(anyhow!("开始日期不能晚于结束日期: {start_compact} > {end_compact}"));
+        return Err(anyhow!(
+            "开始日期不能晚于结束日期: {start_compact} > {end_compact}"
+        ));
     }
 
     let mut out = Vec::new();
@@ -428,9 +436,17 @@ fn month_windows(start_compact: &str, end_compact: &str) -> Result<Vec<(String, 
             NaiveDate::from_ymd_opt(cursor.year(), cursor.month() + 1, 1)
         }
         .ok_or_else(|| anyhow!("无效下个月日期"))?;
-        let month_end = min(next_month.pred_opt().ok_or_else(|| anyhow!("无效月末日期"))?, end);
+        let month_end = min(
+            next_month
+                .pred_opt()
+                .ok_or_else(|| anyhow!("无效月末日期"))?,
+            end,
+        );
 
-        out.push((format_compact_date(month_start), format_compact_date(month_end)));
+        out.push((
+            format_compact_date(month_start),
+            format_compact_date(month_end),
+        ));
         cursor = next_month;
     }
 

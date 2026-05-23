@@ -1944,7 +1944,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rust_kline_fetcher"
+name = "rstock"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3063,6 +3063,20 @@ dependencies = [
  "memchr",
  "thiserror",
  "zopfli",
+]
+
+[[package]]
+name = "zip-csv-to-parquet"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow-array",
+ "arrow-schema",
+ "clap",
+ "csv",
+ "dotenvy",
+ "parquet",
+ "zip",
 ]
 
 [[package]]

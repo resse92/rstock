@@ -12,8 +12,11 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+apalis = "0.7.4"
+apalis-cron = "0.7.4"
 arrow-array = "56"
 arrow-schema = "56"
+axum = "0.7"
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 dotenvy = "0.15"
@@ -23,8 +26,13 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 minio = "0.3.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tdxrs = { git = "https://github.com/jiangtaovan/tdxrs", tag = "v0.5.0" }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 time = "=0.3.36"
 home = "=0.5.9"
 csv = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[features]
+default = ["tdx-fallback"]
+tdx-fallback = []

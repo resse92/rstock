@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
+use std::fs;
 use std::io::Cursor;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -15,6 +17,7 @@ use minio::s3::types::S3Api;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
+use parquet::file::reader::SerializedFileReader;
 
 use crate::models::DailyBar;
 
@@ -108,6 +111,68 @@ pub async fn upload_daily_partition_file(
     Ok(key)
 }
 
+pub async fn upload_daily_partition_file_staged(
+    s3: &S3Client,
+    bucket: &str,
+    exchange: &str,
+    year: &str,
+    month: &str,
+    bars: &[DailyBar],
+    staging_dir: &Path,
+) -> Result<String> {
+    let key =
+        format!("curated/daily_bars/exchange={exchange}/year={year}/month={month}/data.parquet");
+    let local_path = staging_dir.join(&key);
+    write_daily_partition_file_local(&local_path, bars)?;
+    validate_parquet_file(&local_path)?;
+    upload_local_file(s3, bucket, &key, &local_path).await?;
+    Ok(key)
+}
+
+pub fn write_daily_partition_file_local(path: &Path, bars: &[DailyBar]) -> Result<PathBuf> {
+    let parquet_bytes = to_parquet_bytes(bars)?;
+    write_parquet_bytes_local(path, parquet_bytes)
+}
+
+pub fn write_parquet_bytes_local(path: &Path, parquet_bytes: Vec<u8>) -> Result<PathBuf> {
+    if parquet_bytes.is_empty() {
+        return Err(anyhow!("empty parquet bytes"));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, parquet_bytes)?;
+    Ok(path.to_path_buf())
+}
+
+pub fn validate_parquet_file(path: &Path) -> Result<()> {
+    let meta = fs::metadata(path)?;
+    if meta.len() == 0 {
+        return Err(anyhow!("empty parquet file: {}", path.display()));
+    }
+    let file = fs::File::open(path)?;
+    let _reader = SerializedFileReader::new(file)?;
+    Ok(())
+}
+
+pub async fn upload_local_file(
+    s3: &S3Client,
+    bucket: &str,
+    key: &str,
+    local_path: &Path,
+) -> Result<()> {
+    let bytes = fs::read(local_path)?;
+    if bytes.is_empty() {
+        return Err(anyhow!(
+            "refuse to upload empty file: {}",
+            local_path.display()
+        ));
+    }
+    let body = SegmentedBytes::from(Bytes::from(bytes));
+    s3.put_object(bucket, key, body).send().await?;
+    Ok(())
+}
+
 fn to_parquet_bytes(bars: &[DailyBar]) -> Result<Vec<u8>> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("symbol", DataType::Utf8, false),
@@ -119,6 +184,7 @@ fn to_parquet_bytes(bars: &[DailyBar]) -> Result<Vec<u8>> {
         Field::new("close", DataType::Float64, true),
         Field::new("volume", DataType::Float64, true),
         Field::new("amount", DataType::Float64, true),
+        Field::new("adj_factor", DataType::Float64, true),
         Field::new("settle", DataType::Float64, true),
         Field::new("openInterest", DataType::Float64, true),
     ]));
@@ -132,6 +198,7 @@ fn to_parquet_bytes(bars: &[DailyBar]) -> Result<Vec<u8>> {
     let mut close = Float64Builder::new();
     let mut volume = Float64Builder::new();
     let mut amount = Float64Builder::new();
+    let mut adj_factor = Float64Builder::new();
     let mut settle = Float64Builder::new();
     let mut open_interest = Float64Builder::new();
 
@@ -145,6 +212,7 @@ fn to_parquet_bytes(bars: &[DailyBar]) -> Result<Vec<u8>> {
         close.append_option(b.close);
         volume.append_option(b.volume);
         amount.append_option(b.amount);
+        adj_factor.append_option(b.adj_factor);
         settle.append_option(b.settle);
         open_interest.append_option(b.open_interest);
     }
@@ -161,6 +229,7 @@ fn to_parquet_bytes(bars: &[DailyBar]) -> Result<Vec<u8>> {
             Arc::new(close.finish()) as ArrayRef,
             Arc::new(volume.finish()) as ArrayRef,
             Arc::new(amount.finish()) as ArrayRef,
+            Arc::new(adj_factor.finish()) as ArrayRef,
             Arc::new(settle.finish()) as ArrayRef,
             Arc::new(open_interest.finish()) as ArrayRef,
         ],

@@ -14,10 +14,11 @@ use tokio::task::JoinSet;
 use crate::api::ApiClient;
 use crate::models::{DailyBar, MarketRequest, DEFAULT_TIMEOUT_SECS};
 use crate::normalize::normalize_full_kline_response;
-use crate::s3::{build_s3_client, ensure_bucket, upload_daily_partition_file, S3Settings};
+use crate::s3::{build_s3_client, ensure_bucket, upload_daily_partition_file_staged, S3Settings};
+use crate::tdx_source;
 use crate::utils::{chunked, load_stock_codes_from_file};
 
-#[derive(Debug, Args)]
+#[derive(Debug, Args, Clone)]
 pub struct SyncDailyArgs {
     #[arg(long, help = "开始日期，YYYY-MM-DD 或 YYYYMMDD")]
     pub start_date: String,
@@ -51,6 +52,9 @@ pub struct SyncDailyArgs {
 
     #[arg(long, env = "S3_BUCKET", default_value = "stock")]
     pub s3_bucket: String,
+
+    #[arg(long, env = "LOCAL_STAGING_DIR", default_value = "data/staging")]
+    pub staging_dir: PathBuf,
 
     #[arg(long, env = "S3_REGION", default_value = "us-east-1")]
     pub s3_region: String,
@@ -141,6 +145,7 @@ pub async fn run_sync_daily(args: SyncDailyArgs) -> Result<()> {
         .await
         .with_context(|| format!("ensure bucket {} failed", s3_settings.bucket))?;
     let bucket_name = s3_settings.bucket.clone();
+    let staging_dir = args.staging_dir.clone();
     let windows = month_windows(&start_date, &end_date)?;
     let total_months = windows.len();
     let batches = chunked(&stock_codes, args.chunk_size);
@@ -198,13 +203,14 @@ pub async fn run_sync_daily(args: SyncDailyArgs) -> Result<()> {
                         let mut uploaded_now = 0usize;
                         for ((exchange, year, month), rows) in month_partition_cache {
                             let deduped_rows = dedup_daily_rows(rows);
-                            let key = upload_daily_partition_file(
+                            let key = upload_daily_partition_file_staged(
                                 &s3,
                                 &writer_bucket,
                                 &exchange,
                                 &year,
                                 &month,
                                 &deduped_rows,
+                                &staging_dir,
                             )
                             .await?;
                             uploaded_files.insert(key);
@@ -255,19 +261,47 @@ pub async fn run_sync_daily(args: SyncDailyArgs) -> Result<()> {
                 let month_end_clone = month_end.clone();
                 let api_clone = api.clone();
                 join_set.spawn(async move {
-                    let req =
-                        MarketRequest::new(chunk, "1d", month_start_clone, month_end_clone, "none");
-                    let resp = api_clone.fetch_market_batch(&req).await?;
-                    let rows = normalize_full_kline_response(&resp, "1d");
+                    let req = MarketRequest::new(
+                        chunk.clone(),
+                        "1d",
+                        month_start_clone.clone(),
+                        month_end_clone.clone(),
+                        "none",
+                    );
+                    let rows = match api_clone.fetch_market_batch(&req).await {
+                        Ok(resp) => normalize_full_kline_response(&resp, "1d"),
+                        Err(err) => {
+                            eprintln!("[QMT][daily] 批次 {batch_no} 失败，切换 TDX 兜底: {err:#}");
+                            Vec::new()
+                        }
+                    };
                     let mut batch_bars: Vec<DailyBar> = Vec::new();
                     for row in &rows {
                         if let Some(bar) = DailyBar::from_normalized(row) {
                             batch_bars.push(bar);
                         }
                     }
+                    let found: BTreeSet<String> =
+                        batch_bars.iter().map(|bar| bar.symbol.clone()).collect();
+                    let missing = chunk
+                        .iter()
+                        .filter(|code| !found.contains(*code))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if !missing.is_empty() {
+                        eprintln!(
+                            "[QMT][daily] 批次 {batch_no} 缺少 {} 只股票，切换 TDX 兜底",
+                            missing.len()
+                        );
+                        batch_bars.extend(tdx_source::fetch_daily_bars(
+                            &missing,
+                            &month_start_clone,
+                            &month_end_clone,
+                        )?);
+                    }
                     Ok::<(usize, usize, Vec<DailyBar>), anyhow::Error>((
                         batch_no,
-                        rows.len(),
+                        batch_bars.len(),
                         batch_bars,
                     ))
                 });

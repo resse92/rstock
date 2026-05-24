@@ -8,11 +8,8 @@ use anyhow::{anyhow, Context, Result};
 use arrow_array::builder::{Float64Builder, StringBuilder};
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
-use bytes::Bytes;
 use clap::Args;
 use csv::StringRecord;
-use minio::s3::segmented_bytes::SegmentedBytes;
-use minio::s3::types::S3Api;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
@@ -20,6 +17,7 @@ use tokio::task::JoinSet;
 use zip::ZipArchive;
 
 use crate::s3::{build_s3_client, ensure_bucket, S3Client, S3Settings};
+use crate::s3::{upload_local_file, validate_parquet_file, write_parquet_bytes_local};
 
 #[derive(Debug, Args)]
 pub struct ImportMinuteArgs {
@@ -41,6 +39,9 @@ pub struct ImportMinuteArgs {
 
     #[arg(long, env = "S3_BUCKET", default_value = "stock")]
     pub s3_bucket: String,
+
+    #[arg(long, env = "LOCAL_STAGING_DIR", default_value = "data/staging")]
+    pub staging_dir: PathBuf,
 
     #[arg(long, env = "S3_REGION", default_value = "us-east-1")]
     pub s3_region: String,
@@ -131,6 +132,7 @@ pub async fn run_import_minute(args: ImportMinuteArgs) -> Result<()> {
             args.upload_concurrency,
             &s3,
             &s3_settings.bucket,
+            &args.staging_dir,
             &mut next_part_by_partition,
         )
         .await
@@ -198,6 +200,7 @@ async fn process_source(
     upload_concurrency: usize,
     s3: &S3Client,
     bucket: &str,
+    staging_dir: &Path,
     next_part_by_partition: &mut BTreeMap<(String, String), usize>,
 ) -> Result<(usize, usize, usize)> {
     let mut buffers: BTreeMap<(String, String), Vec<MinuteRow>> = BTreeMap::new();
@@ -214,6 +217,7 @@ async fn process_source(
                 upload_concurrency,
                 s3,
                 bucket,
+                staging_dir,
                 next_part_by_partition,
                 &mut buffers,
                 &mut uploads,
@@ -231,6 +235,7 @@ async fn process_source(
                 upload_concurrency,
                 s3,
                 bucket,
+                staging_dir,
                 next_part_by_partition,
                 &mut buffers,
                 &mut uploads,
@@ -246,6 +251,7 @@ async fn process_source(
     flush_all_buffers(
         s3,
         bucket,
+        staging_dir,
         upload_concurrency,
         next_part_by_partition,
         &mut buffers,
@@ -265,6 +271,7 @@ async fn process_zip(
     upload_concurrency: usize,
     s3: &S3Client,
     bucket: &str,
+    staging_dir: &Path,
     next_part_by_partition: &mut BTreeMap<(String, String), usize>,
     buffers: &mut BTreeMap<(String, String), Vec<MinuteRow>>,
     uploads: &mut JoinSet<Result<(String, usize)>>,
@@ -298,6 +305,7 @@ async fn process_zip(
                     upload_concurrency,
                     s3,
                     bucket,
+                    staging_dir,
                     next_part_by_partition,
                     buffers,
                     uploads,
@@ -319,6 +327,7 @@ async fn process_csv_reader<R: Read>(
     upload_concurrency: usize,
     s3: &S3Client,
     bucket: &str,
+    staging_dir: &Path,
     next_part_by_partition: &mut BTreeMap<(String, String), usize>,
     buffers: &mut BTreeMap<(String, String), Vec<MinuteRow>>,
     uploads: &mut JoinSet<Result<(String, usize)>>,
@@ -326,7 +335,9 @@ async fn process_csv_reader<R: Read>(
     written_rows: &mut usize,
     part_files: &mut usize,
 ) -> Result<()> {
-    let mut reader = csv::ReaderBuilder::new().has_headers(true).from_reader(reader);
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(reader);
     for record in reader.records() {
         if let Some(row) = parse_minute_row(&record?) {
             push_row(
@@ -335,6 +346,7 @@ async fn process_csv_reader<R: Read>(
                 upload_concurrency,
                 s3,
                 bucket,
+                staging_dir,
                 next_part_by_partition,
                 buffers,
                 uploads,
@@ -354,6 +366,7 @@ async fn push_row(
     upload_concurrency: usize,
     s3: &S3Client,
     bucket: &str,
+    staging_dir: &Path,
     next_part_by_partition: &mut BTreeMap<(String, String), usize>,
     buffers: &mut BTreeMap<(String, String), Vec<MinuteRow>>,
     uploads: &mut JoinSet<Result<(String, usize)>>,
@@ -368,6 +381,7 @@ async fn push_row(
         flush_rows(
             s3,
             bucket,
+            staging_dir,
             upload_concurrency,
             next_part_by_partition,
             key,
@@ -384,6 +398,7 @@ async fn push_row(
 async fn flush_all_buffers(
     s3: &S3Client,
     bucket: &str,
+    staging_dir: &Path,
     upload_concurrency: usize,
     next_part_by_partition: &mut BTreeMap<(String, String), usize>,
     buffers: &mut BTreeMap<(String, String), Vec<MinuteRow>>,
@@ -396,6 +411,7 @@ async fn flush_all_buffers(
         flush_rows(
             s3,
             bucket,
+            staging_dir,
             upload_concurrency,
             next_part_by_partition,
             key,
@@ -412,6 +428,7 @@ async fn flush_all_buffers(
 async fn flush_rows(
     s3: &S3Client,
     bucket: &str,
+    staging_dir: &Path,
     upload_concurrency: usize,
     next_part_by_partition: &mut BTreeMap<(String, String), usize>,
     key: (String, String),
@@ -438,8 +455,18 @@ async fn flush_rows(
 
     let s3 = s3.clone();
     let bucket = bucket.to_string();
+    let staging_dir = staging_dir.to_path_buf();
     uploads.spawn(async move {
-        upload_minute_part_owned(s3, bucket, trade_date, exchange, part_idx, deduped).await
+        upload_minute_part_owned(
+            s3,
+            bucket,
+            staging_dir,
+            trade_date,
+            exchange,
+            part_idx,
+            deduped,
+        )
+        .await
     });
     Ok(())
 }
@@ -472,13 +499,23 @@ async fn drain_uploads(
 async fn upload_minute_part_owned(
     s3: S3Client,
     bucket: String,
+    staging_dir: PathBuf,
     trade_date: String,
     exchange: String,
     part_idx: usize,
     rows: Vec<MinuteRow>,
 ) -> Result<(String, usize)> {
     let row_count = rows.len();
-    let key = upload_minute_part(&s3, &bucket, &trade_date, &exchange, part_idx, &rows).await?;
+    let key = upload_minute_part(
+        &s3,
+        &bucket,
+        &staging_dir,
+        &trade_date,
+        &exchange,
+        part_idx,
+        &rows,
+    )
+    .await?;
     Ok((key, row_count))
 }
 
@@ -525,6 +562,7 @@ fn dedup_rows(rows: Vec<MinuteRow>) -> Vec<MinuteRow> {
 async fn upload_minute_part(
     s3: &S3Client,
     bucket: &str,
+    staging_dir: &Path,
     trade_date: &str,
     exchange: &str,
     part_idx: usize,
@@ -534,8 +572,10 @@ async fn upload_minute_part(
     let key = format!(
         "curated/minute_bars_1m/trade_date={trade_date}/exchange={exchange}/part-{part_idx:03}.parquet"
     );
-    let body = SegmentedBytes::from(Bytes::from(parquet_bytes));
-    s3.put_object(bucket, &key, body).send().await?;
+    let local_path = staging_dir.join(&key);
+    write_parquet_bytes_local(&local_path, parquet_bytes)?;
+    validate_parquet_file(&local_path)?;
+    upload_local_file(s3, bucket, &key, &local_path).await?;
     Ok(key)
 }
 

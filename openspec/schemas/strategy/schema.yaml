@@ -1,0 +1,55 @@
+name: strategy
+version: 1
+description: K-line data strategy workflow - define calculations, filters, outputs, and validation
+artifacts:
+  - id: strategy
+    generates: strategy.md
+    description: Strategy definition for K-line calculations and screening
+    template: strategy.md
+    instruction: |
+      Create a strategy document that defines how to read K-line data, calculate derived indicators,
+      filter symbols, and produce deterministic results.
+
+      Project context:
+      - Rust 2021 workspace
+      - K-line data is stored and exchanged through Arrow/Parquet, CSV, and ZIP inputs
+      - Daily bars and 1-minute bars may both exist; always state which timeframe the strategy uses
+      - Data may come from local staging or MinIO/S3 curated prefixes
+      - Strategy behavior should be deterministic and suitable for batch computation
+
+      Sections:
+      - **Purpose**: What market pattern, selection idea, or operational question this strategy answers.
+      - **Input Data**: Required K-line frequency, columns, date range, symbol universe, adjustment assumptions, and missing-data rules.
+      - **Calculations**: Indicator formulas, rolling windows, alignment rules, and warm-up period handling.
+      - **Filters**: Screening conditions with exact thresholds and boolean composition.
+      - **Output**: Output fields, sort order, partitioning, and file/API/CLI expectations.
+      - **Validation**: Sample cases, edge cases, reproducibility rules, and performance expectations.
+      - **Risks / Limitations**: Known false positives, data-quality assumptions, and non-goals.
+
+      Be explicit enough that implementation can be tested without guessing.
+    requires: []
+
+  - id: tasks
+    generates: tasks.md
+    description: Implementation checklist for a K-line strategy
+    template: tasks.md
+    instruction: |
+      Create a task list for implementing the strategy.
+
+      Format rules:
+      - Group related tasks under numbered `##` headings
+      - Every task MUST be a checkbox: `- [ ] X.Y Task description`
+      - Tasks should cover data loading, calculation, filtering, output, and verification
+      - Include tests for formulas, missing data, boundary dates, and deterministic output ordering
+
+      Reference strategy.md as the source of truth.
+    requires:
+      - strategy
+
+apply:
+  requires: [tasks]
+  tracks: tasks.md
+  instruction: |
+    Read strategy.md and tasks.md.
+    Implement pending tasks in order, mark completed checkboxes as work is finished,
+    and pause for clarification when strategy formulas, data assumptions, or output contracts are ambiguous.

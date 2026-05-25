@@ -1,0 +1,28 @@
+schema: backend
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+# Add your tech stack, conventions, style guides, domain knowledge, etc.
+# Example:
+#   context: |
+#     Tech stack: TypeScript, React, Node.js
+#     We use conventional commits
+#     Domain: e-commerce platform
+context: |
+  Tech stack: Rust 2021 workspace
+  API conventions: RESTful, JSON responses
+  Backend service: Axum HTTP API + Apalis scheduled jobs running on Tokio
+  Data pipeline: Arrow/Parquet, CSV, ZIP
+  Storage and integration: MinIO (S3-compatible), Reqwest HTTP client, TDX/QMT market data integration
+  CLI and config: Clap-based commands, environment-variable-driven configuration via dotenvy
+  Repository layout: main service in `src/`, offline conversion tool in `tools/zip-csv-to-parquet/`
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours

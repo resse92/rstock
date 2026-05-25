@@ -1,0 +1,121 @@
+name: backend
+version: 1
+description: rstock Rust backend workflow - proposal -> specs -> design -> tasks
+artifacts:
+  - id: proposal
+    generates: proposal.md
+    description: Change proposal for rstock backend and data pipeline work
+    template: proposal.md
+    instruction: |
+      Create the proposal document that explains WHY this change is needed for rstock.
+
+      Project context:
+      - Rust 2021 workspace with the main service in `src/`
+      - Axum HTTP API, Apalis scheduled jobs, Tokio runtime
+      - Arrow/Parquet data pipeline with local staging before MinIO/S3 upload
+      - QMT/TDX market data integration and operational CLI commands via Clap
+      - Configuration is environment-variable driven, loaded with dotenvy
+
+      Sections:
+      - **Why**: 1-2 sentences describing the operational, data quality, API, or maintenance problem.
+      - **What Changes**: Bullet list of concrete behavior changes. Mark breaking API, storage layout, or CLI changes with **BREAKING**.
+      - **Capabilities**: Identify specs to create or modify:
+        - **New Capabilities**: New user-visible or operational behavior. Use kebab-case names.
+        - **Modified Capabilities**: Existing requirements whose behavior changes. Check `openspec/specs/`.
+      - **Impact**: Affected Rust modules, HTTP endpoints, CLI commands, cron jobs, Parquet schemas, staging paths, S3 prefixes, env vars, and external systems.
+
+      Keep the proposal concise and requirement-focused. Implementation details belong in design.md.
+    requires: []
+
+  - id: specs
+    generates: "specs/**/*.md"
+    description: Testable requirements for rstock capabilities
+    template: spec.md
+    instruction: |
+      Create specification files that define WHAT the rstock system SHALL do.
+
+      Create one spec file per capability listed in proposal.md.
+      - New capabilities: `specs/<capability>/spec.md`
+      - Modified capabilities: use the existing capability name from `openspec/specs/`
+
+      Delta operation headers:
+      - `## ADDED Requirements`
+      - `## MODIFIED Requirements`
+      - `## REMOVED Requirements`
+      - `## RENAMED Requirements`
+
+      Requirement rules:
+      - Each requirement uses `### Requirement: <name>`
+      - Use SHALL/MUST for normative behavior
+      - Every requirement MUST include at least one scenario
+      - Each scenario uses exactly `#### Scenario: <name>`
+      - Scenarios use WHEN/THEN bullets
+
+      Prefer scenarios that map to verifiable Rust behavior:
+      - HTTP request/response behavior for Axum endpoints
+      - CLI arguments and env-var configuration behavior
+      - scheduler trigger behavior
+      - Parquet file schema, partitioning, staging, and upload behavior
+      - external API failure, retry, and partial-data handling
+    requires:
+      - proposal
+
+  - id: design
+    generates: design.md
+    description: Technical design for non-trivial rstock changes
+    template: design.md
+    instruction: |
+      Create design.md only when the change benefits from implementation decisions before coding.
+
+      Include design.md for:
+      - changes crossing API, jobs, storage, and CLI boundaries
+      - new Parquet schema, S3 layout, or migration behavior
+      - new external integration or dependency
+      - concurrency, retry, idempotency, or backfill complexity
+      - compatibility concerns for existing data or operational commands
+
+      Sections:
+      - **Context**: current state, constraints, affected modules, and existing behavior
+      - **Goals / Non-Goals**: what the design includes and excludes
+      - **Decisions**: concrete Rust/module/API/storage choices with rationale
+      - **Data & Compatibility**: Parquet schema, S3 prefixes, staging paths, migrations, and backward compatibility
+      - **Failure Handling**: retries, idempotency, partial writes, validation, and rollback
+      - **Risks / Trade-offs**: risks with mitigations
+      - **Open Questions**: unresolved decisions
+
+      Keep design focused on architecture and operational behavior, not line-by-line implementation.
+    requires:
+      - proposal
+
+  - id: tasks
+    generates: tasks.md
+    description: Implementation checklist for rstock changes
+    template: tasks.md
+    instruction: |
+      Create a task list that can be executed incrementally.
+
+      Format rules:
+      - Group related tasks under numbered `##` headings
+      - Every task MUST be a checkbox: `- [ ] X.Y Task description`
+      - Each task should be small enough for one focused coding pass
+      - Include validation tasks for cargo checks/tests and representative runtime paths
+
+      Typical groups:
+      - Spec and contract updates
+      - Data model or Parquet schema changes
+      - API, CLI, job, or integration implementation
+      - Error handling and observability
+      - Tests and manual verification
+
+      Reference specs for expected behavior and design.md for implementation decisions.
+    requires:
+      - specs
+      - design
+
+apply:
+  requires: [tasks]
+  tracks: tasks.md
+  instruction: |
+    Read proposal.md, specs, design.md when present, and tasks.md.
+    Implement pending tasks in order, mark completed checkboxes as work is finished,
+    and pause for clarification when requirements or operational risk are ambiguous.

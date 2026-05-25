@@ -90,11 +90,7 @@ pub async fn run_sync_minute(args: SyncMinuteArgs) -> Result<()> {
         args.authorization,
         Duration::from_secs(args.timeout),
     )?;
-    let stock_codes = if let Some(path) = args.stock_codes_file.as_ref() {
-        load_stock_codes_from_file(path)?
-    } else {
-        api.discover_all_stock_codes().await?
-    };
+    let stock_codes = load_sync_stock_codes(&api, args.stock_codes_file.as_ref()).await?;
 
     let s3_settings = S3Settings {
         endpoint: s3_host,
@@ -106,20 +102,75 @@ pub async fn run_sync_minute(args: SyncMinuteArgs) -> Result<()> {
     let s3 = build_s3_client(&s3_settings).await?;
     ensure_bucket(&s3, &s3_settings.bucket).await?;
 
-    let batches = chunked(&stock_codes, args.chunk_size);
+    let grouped = fetch_minute_grouped_bars(
+        &api,
+        &stock_codes,
+        &start_date,
+        &end_date,
+        args.chunk_size,
+        args.fetch_concurrency,
+    )
+    .await?;
+
+    let mut uploaded = 0usize;
+    let mut rows = 0usize;
+    for ((trade_date, exchange), mut bars) in grouped {
+        bars.sort_by(|a, b| a.symbol.cmp(&b.symbol).then(a.time.cmp(&b.time)));
+        let key = minute_partition_key(&trade_date, &exchange);
+        let local_path = write_minute_partition_file_local(&args.staging_dir, &trade_date, &exchange, &bars)?;
+        validate_parquet_file(&local_path)?;
+        upload_local_file(&s3, &s3_settings.bucket, &key, &local_path).await?;
+        rows += bars.len();
+        uploaded += 1;
+        println!("[PUT] {key} rows={}", bars.len());
+    }
+
+    println!(
+        "[DONE] 分钟线上传完成: {} 条, {} 个分区文件, bucket={}",
+        rows, uploaded, s3_settings.bucket
+    );
+    Ok(())
+}
+
+async fn load_sync_stock_codes(
+    api: &ApiClient,
+    stock_codes_file: Option<&PathBuf>,
+) -> Result<Vec<String>> {
+    if let Some(path) = stock_codes_file {
+        load_stock_codes_from_file(path)
+    } else {
+        api.discover_all_stock_codes().await
+    }
+}
+
+async fn fetch_minute_grouped_bars(
+    api: &ApiClient,
+    stock_codes: &[String],
+    start_date: &str,
+    end_date: &str,
+    chunk_size: usize,
+    fetch_concurrency: usize,
+) -> Result<BTreeMap<(String, String), Vec<MinuteBar1m>>> {
+    let start_compact = compact_date(start_date)?;
+    let end_compact = compact_date(end_date)?;
+    let start_api = dashed_date(&start_compact)?;
+    let end_api = dashed_date(&end_compact)?;
+    let batches = chunked(stock_codes, chunk_size);
     let mut grouped: BTreeMap<(String, String), Vec<MinuteBar1m>> = BTreeMap::new();
     let mut join_set = JoinSet::new();
     let mut next_batch_idx = 0usize;
 
     while next_batch_idx < batches.len() || !join_set.is_empty() {
-        while next_batch_idx < batches.len() && join_set.len() < args.fetch_concurrency {
+        while next_batch_idx < batches.len() && join_set.len() < fetch_concurrency {
             let chunk = batches[next_batch_idx].clone();
             let api_clone = api.clone();
-            let start = start_date.clone();
-            let end = end_date.clone();
+            let start = start_compact.clone();
+            let end = end_compact.clone();
+            let start_api = start_api.clone();
+            let end_api = end_api.clone();
             join_set.spawn(async move {
                 let req =
-                    MarketRequest::new(chunk.clone(), "1m", start.clone(), end.clone(), "none");
+                    MarketRequest::new(chunk.clone(), "1m", start_api.clone(), end_api.clone(), "none");
                 let rows = match api_clone.fetch_market_batch(&req).await {
                     Ok(resp) => normalize_full_kline_response(&resp, "1m"),
                     Err(err) => {
@@ -166,27 +217,22 @@ pub async fn run_sync_minute(args: SyncMinuteArgs) -> Result<()> {
         }
     }
 
-    let mut uploaded = 0usize;
-    let mut rows = 0usize;
-    for ((trade_date, exchange), mut bars) in grouped {
-        bars.sort_by(|a, b| a.symbol.cmp(&b.symbol).then(a.time.cmp(&b.time)));
-        let key = format!(
-            "curated/minute_bars_1m/trade_date={trade_date}/exchange={exchange}/part-000.parquet"
-        );
-        let local_path = args.staging_dir.join(&key);
-        write_parquet_bytes_local(&local_path, minute_to_parquet_bytes(&bars)?)?;
-        validate_parquet_file(&local_path)?;
-        upload_local_file(&s3, &s3_settings.bucket, &key, &local_path).await?;
-        rows += bars.len();
-        uploaded += 1;
-        println!("[PUT] {key} rows={}", bars.len());
-    }
+    Ok(grouped)
+}
 
-    println!(
-        "[DONE] 分钟线上传完成: {} 条, {} 个分区文件, bucket={}",
-        rows, uploaded, s3_settings.bucket
-    );
-    Ok(())
+fn minute_partition_key(trade_date: &str, exchange: &str) -> String {
+    format!("curated/minute_bars_1m/trade_date={trade_date}/exchange={exchange}/part-000.parquet")
+}
+
+fn write_minute_partition_file_local(
+    staging_dir: &std::path::Path,
+    trade_date: &str,
+    exchange: &str,
+    bars: &[MinuteBar1m],
+) -> Result<PathBuf> {
+    let key = minute_partition_key(trade_date, exchange);
+    let local_path = staging_dir.join(key);
+    write_parquet_bytes_local(&local_path, minute_to_parquet_bytes(bars)?)
 }
 
 fn minute_to_parquet_bytes(rows: &[MinuteBar1m]) -> Result<Vec<u8>> {
@@ -278,6 +324,16 @@ fn compact_date(input: &str) -> Result<String> {
     ))
 }
 
+fn dashed_date(input: &str) -> Result<String> {
+    let compact = compact_date(input)?;
+    Ok(format!(
+        "{}-{}-{}",
+        &compact[0..4],
+        &compact[4..6],
+        &compact[6..8]
+    ))
+}
+
 fn env_var_any(keys: &[&str]) -> Option<String> {
     for key in keys {
         if let Ok(v) = env::var(key) {
@@ -287,4 +343,187 @@ fn env_var_any(keys: &[&str]) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        fetch_minute_grouped_bars, minute_partition_key, write_minute_partition_file_local,
+    };
+    use crate::api::ApiClient;
+    use crate::models::{MinuteBar1m, DEFAULT_TIMEOUT_SECS};
+    use anyhow::Result;
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+    use parquet::record::RowAccessor;
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn writes_expected_minute_partition_file_to_local_staging() -> Result<()> {
+        let staging_dir = temp_dir("sync-minute");
+        let bars = vec![
+            minute_bar("000001.SZ", "SZ", "2026-05-24 09:31:00", 10.0),
+            minute_bar("000001.SZ", "SZ", "2026-05-24 09:32:00", 10.2),
+            minute_bar("600000.SH", "SH", "2026-05-24 09:31:00", 8.8),
+        ];
+
+        let local_path = write_minute_partition_file_local(
+            &staging_dir,
+            "2026-05-24",
+            "SZ",
+            &bars[..2],
+        )?;
+
+        let expected = staging_dir.join(minute_partition_key("2026-05-24", "SZ"));
+        assert_eq!(local_path, expected);
+        assert!(local_path.exists());
+
+        let rows = read_rows(&local_path)?;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "000001.SZ");
+        assert_eq!(rows[0].1, "SZ");
+        assert_eq!(rows[0].2, "2026-05-24 09:31:00");
+        assert_eq!(rows[1].2, "2026-05-24 09:32:00");
+        assert_eq!(rows[0].3, Some(10.0));
+        assert_eq!(rows[1].3, Some(10.2));
+
+        fs::remove_dir_all(staging_dir)?;
+        Ok(())
+    }
+
+    fn minute_bar(symbol: &str, exchange: &str, time: &str, open: f64) -> MinuteBar1m {
+        MinuteBar1m {
+            symbol: symbol.to_string(),
+            exchange: exchange.to_string(),
+            time: time.to_string(),
+            open: Some(open),
+            high: Some(open + 0.5),
+            low: Some(open - 0.5),
+            close: Some(open + 0.1),
+            volume: Some(1000.0),
+            amount: Some(10000.0),
+            adj_factor: Some(1.0),
+            settle: None,
+            open_interest: None,
+            source: Some("test".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "hits real QMT/TDX and stages parquet locally"]
+    async fn real_minute_sync_stages_remote_rows_without_upload() -> Result<()> {
+        dotenvy::dotenv().ok();
+        let api = ApiClient::new(
+            std::env::var("QMT_API_HOST").unwrap_or_else(|_| "http://127.0.0.1:8000".to_string()),
+            std::env::var("QMT_API_AUTHORIZATION").ok(),
+            std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+        )?;
+        let codes = real_minute_codes();
+        let start_date = "2025-01-02".to_string();
+        let end_date = start_date.clone();
+
+        let mut grouped = fetch_minute_grouped_bars(&api, &codes, &start_date, &end_date, 20, 1).await?;
+        assert!(!grouped.is_empty(), "no remote minute rows fetched");
+
+        let staging_dir = temp_dir("real-sync-minute");
+        let mut expected_by_key = BTreeMap::new();
+        for ((trade_date, exchange), bars) in &mut grouped {
+            bars.sort_by(|a, b| a.symbol.cmp(&b.symbol).then(a.time.cmp(&b.time)));
+            let key = minute_partition_key(trade_date, exchange);
+            let path = write_minute_partition_file_local(&staging_dir, trade_date, exchange, bars)?;
+            expected_by_key.insert(key.clone(), rows_from_minute_bars(bars));
+            let actual = read_full_rows(&path)?;
+            assert_eq!(actual, expected_by_key[&key], "minute parquet mismatch for {key}");
+        }
+
+        fs::remove_dir_all(staging_dir)?;
+        Ok(())
+    }
+
+    fn read_rows(path: &Path) -> Result<Vec<(String, String, String, Option<f64>)>> {
+        let file = fs::File::open(path)?;
+        let reader = SerializedFileReader::new(file)?;
+        let iter = reader.get_row_iter(None)?;
+        let mut out = Vec::new();
+        for record in iter {
+            let record = record?;
+            out.push((
+                record.get_string(0)?.to_string(),
+                record.get_string(1)?.to_string(),
+                record.get_string(2)?.to_string(),
+                record.get_double(3).ok(),
+            ));
+        }
+        Ok(out)
+    }
+
+    fn read_full_rows(path: &Path) -> Result<Vec<MinuteRow>> {
+        let file = fs::File::open(path)?;
+        let reader = SerializedFileReader::new(file)?;
+        let iter = reader.get_row_iter(None)?;
+        let mut out = Vec::new();
+        for record in iter {
+            let record = record?;
+            out.push((
+                record.get_string(0)?.to_string(),
+                record.get_string(1)?.to_string(),
+                record.get_string(2)?.to_string(),
+                record.get_double(3).ok(),
+                record.get_double(4).ok(),
+                record.get_double(5).ok(),
+                record.get_double(6).ok(),
+                record.get_double(7).ok(),
+                record.get_double(8).ok(),
+            ));
+        }
+        Ok(out)
+    }
+
+    type MinuteRow = (
+        String,
+        String,
+        String,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+    );
+
+    fn rows_from_minute_bars(bars: &[MinuteBar1m]) -> Vec<MinuteRow> {
+        bars.iter()
+            .map(|bar| {
+                (
+                    bar.symbol.clone(),
+                    bar.exchange.clone(),
+                    bar.time.clone(),
+                    bar.open,
+                    bar.high,
+                    bar.low,
+                    bar.close,
+                    bar.volume,
+                    bar.amount,
+                )
+            })
+            .collect()
+    }
+
+    fn real_minute_codes() -> Vec<String> {
+        vec!["000001.SZ".to_string(), "600519.SH".to_string()]
+    }
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("temp")
+            .join(format!("{prefix}-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
 }

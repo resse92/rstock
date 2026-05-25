@@ -1,0 +1,27 @@
+[package]
+name = "tdxrs"
+version = "0.5.0"
+edition = "2021"
+description = "TDX (通达信) market data parser — Rust implementation with Python bindings"
+license = "MIT"
+readme = "README.md"
+authors = ["Chiang Tao <chiangtao_fan@hotmail.com>"]
+repository = "https://github.com/jiangtaovan/tdxrs"
+homepage = "https://github.com/jiangtaovan/tdxrs"
+
+[lib]
+name = "tdxrs"
+crate-type = ["rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+flate2 = "1"
+# encoding_rs — GBK/GB2312 中文编码 (板块、财务数据中的中文名称)
+encoding_rs = "0.8"
+# tokio — async I/O runtime. 已启用编译。
+# 注意: x86_64-pc-windows-gnu 需要 MSYS2 dlltool (详见 docs/INSTALL.md)
+tokio = { version = "1.50.0", features = [
+    "net", "io-util", "rt", "rt-multi-thread", "time", "sync", "macros",
+] }

@@ -77,23 +77,23 @@ pub async fn run_sync_daily(args: SyncDailyArgs) -> Result<()> {
         return Err(anyhow!("--fetch-concurrency 必须大于 0"));
     }
 
-    let mut start_date = compact_date(&args.start_date)?;
-    let end_date = compact_date(&args.end_date)?;
-    let mut start_day = parse_compact_date(&start_date)?;
-    let end_day = parse_compact_date(&end_date)?;
+    let mut start_date_compact = compact_date(&args.start_date)?;
+    let end_date_compact = compact_date(&args.end_date)?;
+    let mut start_day = parse_compact_date(&start_date_compact)?;
+    let end_day = parse_compact_date(&end_date_compact)?;
 
     if args.incremental {
         if let Some(watermark_day) = read_watermark_day(&args.watermark_file)? {
             if let Some(next_day) = watermark_day.succ_opt() {
                 if next_day > start_day {
                     start_day = next_day;
-                    start_date = format_compact_date(start_day);
+                    start_date_compact = format_compact_date(start_day);
                 }
             }
             println!(
                 "[INFO] incremental 模式: watermark={}, 实际开始日期={}",
                 format_compact_date(watermark_day),
-                start_date
+                start_date_compact
             );
         } else {
             println!(
@@ -104,10 +104,10 @@ pub async fn run_sync_daily(args: SyncDailyArgs) -> Result<()> {
     }
 
     if start_day > end_day {
-        println!(
-            "[DONE] 无需同步: 开始日期 {} 晚于结束日期 {}",
-            start_date, end_date
-        );
+            println!(
+                "[DONE] 无需同步: 开始日期 {} 晚于结束日期 {}",
+                start_date_compact, end_date_compact
+            );
         return Ok(());
     }
 
@@ -122,15 +122,8 @@ pub async fn run_sync_daily(args: SyncDailyArgs) -> Result<()> {
         Duration::from_secs(args.timeout),
     )?;
 
-    let stock_codes = if let Some(path) = args.stock_codes_file.as_ref() {
-        let codes = load_stock_codes_from_file(path)?;
-        println!("[INFO] 从文件加载股票 {} 只", codes.len());
-        codes
-    } else {
-        let codes = api.discover_all_stock_codes().await?;
-        println!("[INFO] 自动发现股票 {} 只", codes.len());
-        codes
-    };
+    let stock_codes = load_sync_stock_codes(&api, args.stock_codes_file.as_ref()).await?;
+    println!("[INFO] 使用股票 {} 只", stock_codes.len());
 
     let s3_settings = S3Settings {
         endpoint: s3_host,
@@ -146,7 +139,7 @@ pub async fn run_sync_daily(args: SyncDailyArgs) -> Result<()> {
         .with_context(|| format!("ensure bucket {} failed", s3_settings.bucket))?;
     let bucket_name = s3_settings.bucket.clone();
     let staging_dir = args.staging_dir.clone();
-    let windows = month_windows(&start_date, &end_date)?;
+    let windows = month_windows(&start_date_compact, &end_date_compact)?;
     let total_months = windows.len();
     let batches = chunked(&stock_codes, args.chunk_size);
     let total_batches = batches.len();
@@ -156,8 +149,8 @@ pub async fn run_sync_daily(args: SyncDailyArgs) -> Result<()> {
         stock_codes.len(),
         total_batches,
         total_months,
-        start_date,
-        end_date
+        start_date_compact,
+        end_date_compact
     );
 
     #[derive(Debug)]
@@ -259,13 +252,15 @@ pub async fn run_sync_daily(args: SyncDailyArgs) -> Result<()> {
                 let chunk = batches[next_batch_idx].clone();
                 let month_start_clone = month_start.clone();
                 let month_end_clone = month_end.clone();
+                let month_start_api = dashed_date(&month_start_clone)?;
+                let month_end_api = dashed_date(&month_end_clone)?;
                 let api_clone = api.clone();
                 join_set.spawn(async move {
                     let req = MarketRequest::new(
                         chunk.clone(),
                         "1d",
-                        month_start_clone.clone(),
-                        month_end_clone.clone(),
+                        month_start_api.clone(),
+                        month_end_api.clone(),
                         "none",
                     );
                     let rows = match api_clone.fetch_market_batch(&req).await {
@@ -358,11 +353,11 @@ pub async fn run_sync_daily(args: SyncDailyArgs) -> Result<()> {
         .map_err(|e| anyhow!("writer task join error: {e}"))??;
 
     if args.incremental {
-        write_watermark_day(&args.watermark_file, &end_date)?;
+        write_watermark_day(&args.watermark_file, &end_date_compact)?;
         println!(
             "[INFO] 最终 watermark 已更新: {} -> {}",
             args.watermark_file.display(),
-            end_date
+            end_date_compact
         );
     }
 
@@ -372,6 +367,143 @@ pub async fn run_sync_daily(args: SyncDailyArgs) -> Result<()> {
     );
 
     Ok(())
+}
+
+async fn load_sync_stock_codes(
+    api: &ApiClient,
+    stock_codes_file: Option<&PathBuf>,
+) -> Result<Vec<String>> {
+    if let Some(path) = stock_codes_file {
+        load_stock_codes_from_file(path)
+    } else {
+        api.discover_all_stock_codes().await
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+async fn fetch_daily_bars_with_fallback(
+    api: &ApiClient,
+    stock_codes: &[String],
+    start_date: &str,
+    end_date: &str,
+    chunk_size: usize,
+    fetch_concurrency: usize,
+) -> Result<Vec<DailyBar>> {
+    let start_date = compact_date(start_date)?;
+    let end_date = compact_date(end_date)?;
+    let windows = month_windows(&start_date, &end_date)?;
+    let batches = chunked(stock_codes, chunk_size);
+    let total_batches = batches.len();
+    let total_months = windows.len();
+    let mut all_bars = Vec::new();
+
+    for (month_idx, (month_start, month_end)) in windows.into_iter().enumerate() {
+        let mut join_set = JoinSet::new();
+        let mut next_batch_idx = 0usize;
+
+        while next_batch_idx < total_batches || !join_set.is_empty() {
+            while next_batch_idx < total_batches && join_set.len() < fetch_concurrency {
+                let batch_no = next_batch_idx + 1;
+                let chunk = batches[next_batch_idx].clone();
+                let month_start_clone = month_start.clone();
+                let month_end_clone = month_end.clone();
+                let month_start_api = dashed_date(&month_start_clone)?;
+                let month_end_api = dashed_date(&month_end_clone)?;
+                let api_clone = api.clone();
+                join_set.spawn(async move {
+                    let req = MarketRequest::new(
+                        chunk.clone(),
+                        "1d",
+                        month_start_api.clone(),
+                        month_end_api.clone(),
+                        "none",
+                    );
+                    let rows = match api_clone.fetch_market_batch(&req).await {
+                        Ok(resp) => normalize_full_kline_response(&resp, "1d"),
+                        Err(err) => {
+                            eprintln!("[QMT][daily] 批次 {batch_no} 失败，切换 TDX 兜底: {err:#}");
+                            Vec::new()
+                        }
+                    };
+                    let mut batch_bars: Vec<DailyBar> = Vec::new();
+                    for row in &rows {
+                        if let Some(bar) = DailyBar::from_normalized(row) {
+                            batch_bars.push(bar);
+                        }
+                    }
+                    let found: BTreeSet<String> =
+                        batch_bars.iter().map(|bar| bar.symbol.clone()).collect();
+                    let missing = chunk
+                        .iter()
+                        .filter(|code| !found.contains(*code))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if !missing.is_empty() {
+                        eprintln!(
+                            "[QMT][daily] 批次 {batch_no} 缺少 {} 只股票，切换 TDX 兜底",
+                            missing.len()
+                        );
+                        batch_bars.extend(tdx_source::fetch_daily_bars(
+                            &missing,
+                            &month_start_clone,
+                            &month_end_clone,
+                        )?);
+                    }
+                    Ok::<(usize, Vec<DailyBar>), anyhow::Error>((batch_no, batch_bars))
+                });
+                next_batch_idx += 1;
+            }
+
+            let finished = join_set
+                .join_next()
+                .await
+                .ok_or_else(|| anyhow!("fetch 并发任务异常结束"))?;
+            let (batch_no, bars) =
+                finished.map_err(|e| anyhow!("fetch task join error: {e}"))??;
+            println!(
+                "[FETCHER] 月 {}/{} 批次 {}/{}: 解析 {} 条",
+                month_idx + 1,
+                total_months,
+                batch_no,
+                total_batches,
+                bars.len()
+            );
+            all_bars.extend(bars);
+        }
+    }
+
+    Ok(all_bars)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn stage_daily_bars_local(
+    staging_dir: &std::path::Path,
+    bars: Vec<DailyBar>,
+) -> Result<Vec<(String, PathBuf, usize)>> {
+    let mut groups: BTreeMap<(String, String, String), Vec<DailyBar>> = BTreeMap::new();
+    for bar in bars {
+        if bar.time.len() < 7 {
+            continue;
+        }
+        let year = bar.time[0..4].to_string();
+        let month = bar.time[5..7].to_string();
+        groups
+            .entry((bar.exchange.clone(), year, month))
+            .or_default()
+            .push(bar);
+    }
+
+    let mut out = Vec::new();
+    for ((exchange, year, month), rows) in groups {
+        let deduped = dedup_daily_rows(rows);
+        let key =
+            format!("curated/daily_bars/exchange={exchange}/year={year}/month={month}/data.parquet");
+        let path = staging_dir.join(&key);
+        crate::s3::write_daily_partition_file_local(&path, &deduped)?;
+        crate::s3::validate_parquet_file(&path)?;
+        out.push((key, path, deduped.len()));
+    }
+    Ok(out)
 }
 
 fn dedup_daily_rows(rows: Vec<DailyBar>) -> Vec<DailyBar> {
@@ -426,6 +558,16 @@ fn compact_date(input: &str) -> Result<String> {
     }
     Err(anyhow!(
         "无效日期格式: {input}，应为 YYYY-MM-DD 或 YYYYMMDD"
+    ))
+}
+
+fn dashed_date(input: &str) -> Result<String> {
+    let compact = compact_date(input)?;
+    Ok(format!(
+        "{}-{}-{}",
+        &compact[0..4],
+        &compact[4..6],
+        &compact[6..8]
     ))
 }
 
@@ -485,4 +627,231 @@ fn month_windows(start_compact: &str, end_compact: &str) -> Result<Vec<(String, 
     }
 
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{dedup_daily_rows, fetch_daily_bars_with_fallback, stage_daily_bars_local};
+    use crate::api::ApiClient;
+    use crate::models::{DailyBar, DEFAULT_TIMEOUT_SECS};
+    use crate::s3::write_daily_partition_file_local;
+    use anyhow::Result;
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+    use parquet::record::RowAccessor;
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn dedup_daily_rows_keeps_latest_row_per_symbol_and_day() {
+        let rows = vec![
+            daily_bar("000001.SZ", "SZ", "2026-05-20", 10.0),
+            daily_bar("000001.SZ", "SZ", "2026-05-20", 11.0),
+            daily_bar("000001.SZ", "SZ", "2026-05-21", 12.0),
+            daily_bar("600000.SH", "SH", "2026-05-20", 8.0),
+        ];
+
+        let deduped = dedup_daily_rows(rows);
+
+        assert_eq!(deduped.len(), 3);
+        assert_eq!(deduped[0].symbol, "000001.SZ");
+        assert_eq!(deduped[0].time, "2026-05-20");
+        assert_eq!(deduped[0].open, Some(11.0));
+        assert_eq!(deduped[1].time, "2026-05-21");
+        assert_eq!(deduped[2].symbol, "600000.SH");
+    }
+
+    #[test]
+    fn writes_expected_daily_partition_file_to_local_staging() -> Result<()> {
+        let staging_dir = temp_dir("sync-daily");
+        let relative = "curated/daily_bars/exchange=SZ/year=2026/month=05/data.parquet";
+        let local_path = staging_dir.join(relative);
+        let rows = dedup_daily_rows(vec![
+            daily_bar("000001.SZ", "SZ", "2026-05-20", 10.0),
+            daily_bar("000001.SZ", "SZ", "2026-05-20", 11.0),
+            daily_bar("000002.SZ", "SZ", "2026-05-21", 20.0),
+        ]);
+
+        let written = write_daily_partition_file_local(&local_path, &rows)?;
+        assert_eq!(written, local_path);
+        assert!(written.exists());
+
+        let parquet_rows = read_rows(&written)?;
+        assert_eq!(parquet_rows.len(), 2);
+        assert_eq!(parquet_rows[0].0, "000001.SZ");
+        assert_eq!(parquet_rows[0].1, "SZ");
+        assert_eq!(parquet_rows[0].2, "2026-05-20");
+        assert_eq!(parquet_rows[0].3, Some(11.0));
+        assert_eq!(parquet_rows[1].0, "000002.SZ");
+        assert_eq!(parquet_rows[1].2, "2026-05-21");
+
+        fs::remove_dir_all(staging_dir)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "hits real QMT/TDX and stages parquet locally"]
+    async fn real_daily_sync_stages_remote_rows_without_upload() -> Result<()> {
+        dotenvy::dotenv().ok();
+        let api = ApiClient::new(
+            std::env::var("QMT_API_HOST").unwrap_or_else(|_| "http://127.0.0.1:8000".to_string()),
+            std::env::var("QMT_API_AUTHORIZATION").ok(),
+            std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+        )?;
+        let codes = real_daily_codes(&api).await?;
+        let start_date = "2025-01-02".to_string();
+        let end_date = start_date.clone();
+
+        let fetched = fetch_daily_bars_with_fallback(&api, &codes, &start_date, &end_date, 20, 1).await?;
+        assert!(!fetched.is_empty(), "no remote daily rows fetched");
+
+        let mut expected_groups: BTreeMap<String, Vec<DailyRow>> = BTreeMap::new();
+        let mut grouped: BTreeMap<(String, String, String), Vec<DailyBar>> = BTreeMap::new();
+        for bar in fetched {
+            let year = bar.time[0..4].to_string();
+            let month = bar.time[5..7].to_string();
+            grouped
+                .entry((bar.exchange.clone(), year, month))
+                .or_default()
+                .push(bar);
+        }
+        for ((exchange, year, month), rows) in grouped {
+            let key =
+                format!("curated/daily_bars/exchange={exchange}/year={year}/month={month}/data.parquet");
+            let deduped = dedup_daily_rows(rows);
+            expected_groups.insert(key, rows_from_daily_bars(&deduped));
+        }
+
+        let staging_dir = temp_dir("real-sync-daily");
+        let staged = stage_daily_bars_local(&staging_dir, expected_groups.values().flatten().cloned().map(daily_row_to_bar).collect())?;
+        for (key, path, _) in staged {
+            let actual = read_full_rows(&path)?;
+            assert_eq!(actual, expected_groups[&key], "daily parquet mismatch for {key}");
+        }
+
+        // fs::remove_dir_all(staging_dir)?;
+        Ok(())
+    }
+
+    fn daily_bar(symbol: &str, exchange: &str, time: &str, open: f64) -> DailyBar {
+        DailyBar {
+            symbol: symbol.to_string(),
+            exchange: exchange.to_string(),
+            time: time.to_string(),
+            open: Some(open),
+            high: Some(open + 1.0),
+            low: Some(open - 1.0),
+            close: Some(open + 0.5),
+            volume: Some(1000.0),
+            amount: Some(10000.0),
+            adj_factor: Some(1.0),
+            settle: None,
+            open_interest: None,
+            source: Some("test".to_string()),
+        }
+    }
+
+    fn read_rows(path: &Path) -> Result<Vec<(String, String, String, Option<f64>)>> {
+        let file = fs::File::open(path)?;
+        let reader = SerializedFileReader::new(file)?;
+        let iter = reader.get_row_iter(None)?;
+        let mut out = Vec::new();
+        for record in iter {
+            let record = record?;
+            out.push((
+                record.get_string(0)?.to_string(),
+                record.get_string(1)?.to_string(),
+                record.get_string(2)?.to_string(),
+                record.get_double(3).ok(),
+            ));
+        }
+        Ok(out)
+    }
+
+    fn read_full_rows(path: &Path) -> Result<Vec<DailyRow>> {
+        let file = fs::File::open(path)?;
+        let reader = SerializedFileReader::new(file)?;
+        let iter = reader.get_row_iter(None)?;
+        let mut out = Vec::new();
+        for record in iter {
+            let record = record?;
+            out.push((
+                record.get_string(0)?.to_string(),
+                record.get_string(1)?.to_string(),
+                record.get_string(2)?.to_string(),
+                record.get_double(3).ok(),
+                record.get_double(4).ok(),
+                record.get_double(5).ok(),
+                record.get_double(6).ok(),
+                record.get_double(7).ok(),
+                record.get_double(8).ok(),
+            ));
+        }
+        Ok(out)
+    }
+
+    type DailyRow = (
+        String,
+        String,
+        String,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+    );
+
+    fn rows_from_daily_bars(bars: &[DailyBar]) -> Vec<DailyRow> {
+        bars.iter()
+            .map(|bar| {
+                (
+                    bar.symbol.clone(),
+                    bar.exchange.clone(),
+                    bar.time.clone(),
+                    bar.open,
+                    bar.high,
+                    bar.low,
+                    bar.close,
+                    bar.volume,
+                    bar.amount,
+                )
+            })
+            .collect()
+    }
+
+    fn daily_row_to_bar(row: DailyRow) -> DailyBar {
+        DailyBar {
+            symbol: row.0,
+            exchange: row.1,
+            time: row.2,
+            open: row.3,
+            high: row.4,
+            low: row.5,
+            close: row.6,
+            volume: row.7,
+            amount: row.8,
+            adj_factor: None,
+            settle: None,
+            open_interest: None,
+            source: Some("test".to_string()),
+        }
+    }
+
+    async fn real_daily_codes(api: &ApiClient) -> Result<Vec<String>> {
+        api.discover_all_stock_codes().await
+    }
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("temp")
+            .join(format!("{prefix}-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
 }

@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 
 use crate::api::ApiClient;
-use crate::models::{DailyBar, MarketRequest, DEFAULT_TIMEOUT_SECS};
+use crate::models::{DailyBar, MarketRequest, DEFAULT_QMT_API_HOST, DEFAULT_TIMEOUT_SECS};
 use crate::normalize::normalize_full_kline_response;
 use crate::s3::{build_s3_client, ensure_bucket, upload_daily_partition_file_staged, S3Settings};
 use crate::tdx_source;
@@ -41,7 +41,7 @@ pub struct SyncDailyArgs {
     #[arg(long)]
     pub stock_codes_file: Option<PathBuf>,
 
-    #[arg(long, env = "QMT_API_HOST", default_value = "http://127.0.0.1:8000")]
+    #[arg(long, env = "QMT_API_HOST", default_value = DEFAULT_QMT_API_HOST)]
     pub base_url: String,
 
     #[arg(long, env = "QMT_API_AUTHORIZATION")]
@@ -104,10 +104,10 @@ pub async fn run_sync_daily(args: SyncDailyArgs) -> Result<()> {
     }
 
     if start_day > end_day {
-            println!(
-                "[DONE] 无需同步: 开始日期 {} 晚于结束日期 {}",
-                start_date_compact, end_date_compact
-            );
+        println!(
+            "[DONE] 无需同步: 开始日期 {} 晚于结束日期 {}",
+            start_date_compact, end_date_compact
+        );
         return Ok(());
     }
 
@@ -496,8 +496,9 @@ fn stage_daily_bars_local(
     let mut out = Vec::new();
     for ((exchange, year, month), rows) in groups {
         let deduped = dedup_daily_rows(rows);
-        let key =
-            format!("curated/daily_bars/exchange={exchange}/year={year}/month={month}/data.parquet");
+        let key = format!(
+            "curated/daily_bars/exchange={exchange}/year={year}/month={month}/data.parquet"
+        );
         let path = staging_dir.join(&key);
         crate::s3::write_daily_partition_file_local(&path, &deduped)?;
         crate::s3::validate_parquet_file(&path)?;
@@ -633,7 +634,7 @@ fn month_windows(start_compact: &str, end_compact: &str) -> Result<Vec<(String, 
 mod tests {
     use super::{dedup_daily_rows, fetch_daily_bars_with_fallback, stage_daily_bars_local};
     use crate::api::ApiClient;
-    use crate::models::{DailyBar, DEFAULT_TIMEOUT_SECS};
+    use crate::models::{DailyBar, DEFAULT_QMT_API_HOST, DEFAULT_TIMEOUT_SECS};
     use crate::s3::write_daily_partition_file_local;
     use anyhow::Result;
     use parquet::file::reader::{FileReader, SerializedFileReader};
@@ -695,7 +696,7 @@ mod tests {
     async fn real_daily_sync_stages_remote_rows_without_upload() -> Result<()> {
         dotenvy::dotenv().ok();
         let api = ApiClient::new(
-            std::env::var("QMT_API_HOST").unwrap_or_else(|_| "http://127.0.0.1:8000".to_string()),
+            std::env::var("QMT_API_HOST").unwrap_or_else(|_| DEFAULT_QMT_API_HOST.to_string()),
             std::env::var("QMT_API_AUTHORIZATION").ok(),
             std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS),
         )?;
@@ -703,7 +704,8 @@ mod tests {
         let start_date = "2025-01-02".to_string();
         let end_date = start_date.clone();
 
-        let fetched = fetch_daily_bars_with_fallback(&api, &codes, &start_date, &end_date, 20, 1).await?;
+        let fetched =
+            fetch_daily_bars_with_fallback(&api, &codes, &start_date, &end_date, 20, 1).await?;
         assert!(!fetched.is_empty(), "no remote daily rows fetched");
 
         let mut expected_groups: BTreeMap<String, Vec<DailyRow>> = BTreeMap::new();
@@ -717,17 +719,29 @@ mod tests {
                 .push(bar);
         }
         for ((exchange, year, month), rows) in grouped {
-            let key =
-                format!("curated/daily_bars/exchange={exchange}/year={year}/month={month}/data.parquet");
+            let key = format!(
+                "curated/daily_bars/exchange={exchange}/year={year}/month={month}/data.parquet"
+            );
             let deduped = dedup_daily_rows(rows);
             expected_groups.insert(key, rows_from_daily_bars(&deduped));
         }
 
         let staging_dir = temp_dir("real-sync-daily");
-        let staged = stage_daily_bars_local(&staging_dir, expected_groups.values().flatten().cloned().map(daily_row_to_bar).collect())?;
+        let staged = stage_daily_bars_local(
+            &staging_dir,
+            expected_groups
+                .values()
+                .flatten()
+                .cloned()
+                .map(daily_row_to_bar)
+                .collect(),
+        )?;
         for (key, path, _) in staged {
             let actual = read_full_rows(&path)?;
-            assert_eq!(actual, expected_groups[&key], "daily parquet mismatch for {key}");
+            assert_eq!(
+                actual, expected_groups[&key],
+                "daily parquet mismatch for {key}"
+            );
         }
 
         // fs::remove_dir_all(staging_dir)?;

@@ -12,7 +12,7 @@
 - `DAILY_CRON`，默认 `0 30 15 * * *`
 - `MINUTE_CRON`，默认 `0 10 15 * * *`
 - `LOCAL_STAGING_DIR`，默认 `data/staging`
-- `QMT_API_HOST`、`QMT_API_AUTHORIZATION`
+- `QMT_API_HOST`，默认 `http://103.85.227.158:40002`，也可填该服务的 `/openapi.json` 地址；`QMT_API_AUTHORIZATION`
 - `S3_HOST`、`S3_BUCKET`、`S3_ACCESS_KEY`、`S3_SECRET_KEY`
 
 接口：

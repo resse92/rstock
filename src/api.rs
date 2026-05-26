@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Client, Method};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::models::MarketRequest;
 
@@ -29,8 +29,9 @@ impl ApiClient {
                 format!("Bearer {v}")
             }
         });
+        let base_url = normalize_base_url(&base_url.into());
         Ok(Self {
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            base_url,
             authorization,
             client,
         })
@@ -84,7 +85,7 @@ impl ApiClient {
     pub async fn fetch_market_batch(&self, req: &MarketRequest) -> Result<Value> {
         self.request_json(
             Method::POST,
-            "/api/v1/data/market",
+            "/api/v1/data/kline-history",
             Some(serde_json::to_value(req)?),
         )
         .await
@@ -95,30 +96,27 @@ impl ApiClient {
             .await
     }
 
-    pub async fn fetch_sector_stocks(&self, sector_name: &str) -> Result<Value> {
-        self.request_json(
-            Method::POST,
-            "/api/v1/data/sector",
-            Some(json!({ "sector_name": sector_name })),
-        )
-        .await
-    }
-
     pub async fn discover_all_stock_codes(&self) -> Result<Vec<String>> {
-        let sector_name = "沪深A股";
         let v = self
-            .fetch_sector_stocks(sector_name)
+            .fetch_sectors()
             .await
-            .with_context(|| format!("调用 /api/v1/data/sector 失败: {sector_name}"))?;
+            .context("调用 /api/v1/data/sectors 失败")?;
         let codes: BTreeSet<String> = extract_stock_list(&v)
             .into_iter()
             .filter(|code| is_hsba_a_share(code))
             .collect();
         if codes.is_empty() {
-            return Err(anyhow!("板块 {sector_name} 未返回任何沪深京A股代码"));
+            return Err(anyhow!("/api/v1/data/sectors 未返回任何沪深京A股代码"));
         }
         Ok(codes.into_iter().collect())
     }
+}
+
+fn normalize_base_url(raw: &str) -> String {
+    raw.trim()
+        .trim_end_matches("/openapi.json")
+        .trim_end_matches('/')
+        .to_string()
 }
 
 fn is_hsba_a_share(code: &str) -> bool {

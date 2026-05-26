@@ -16,7 +16,7 @@ use parquet::file::properties::WriterProperties;
 use tokio::task::JoinSet;
 
 use crate::api::ApiClient;
-use crate::models::{MarketRequest, MinuteBar1m, DEFAULT_TIMEOUT_SECS};
+use crate::models::{MarketRequest, MinuteBar1m, DEFAULT_QMT_API_HOST, DEFAULT_TIMEOUT_SECS};
 use crate::normalize::normalize_full_kline_response;
 use crate::s3::{
     build_s3_client, ensure_bucket, upload_local_file, validate_parquet_file,
@@ -42,7 +42,7 @@ pub struct SyncMinuteArgs {
     #[arg(long)]
     pub stock_codes_file: Option<PathBuf>,
 
-    #[arg(long, env = "QMT_API_HOST", default_value = "http://127.0.0.1:8000")]
+    #[arg(long, env = "QMT_API_HOST", default_value = DEFAULT_QMT_API_HOST)]
     pub base_url: String,
 
     #[arg(long, env = "QMT_API_AUTHORIZATION")]
@@ -117,7 +117,8 @@ pub async fn run_sync_minute(args: SyncMinuteArgs) -> Result<()> {
     for ((trade_date, exchange), mut bars) in grouped {
         bars.sort_by(|a, b| a.symbol.cmp(&b.symbol).then(a.time.cmp(&b.time)));
         let key = minute_partition_key(&trade_date, &exchange);
-        let local_path = write_minute_partition_file_local(&args.staging_dir, &trade_date, &exchange, &bars)?;
+        let local_path =
+            write_minute_partition_file_local(&args.staging_dir, &trade_date, &exchange, &bars)?;
         validate_parquet_file(&local_path)?;
         upload_local_file(&s3, &s3_settings.bucket, &key, &local_path).await?;
         rows += bars.len();
@@ -169,8 +170,13 @@ async fn fetch_minute_grouped_bars(
             let start_api = start_api.clone();
             let end_api = end_api.clone();
             join_set.spawn(async move {
-                let req =
-                    MarketRequest::new(chunk.clone(), "1m", start_api.clone(), end_api.clone(), "none");
+                let req = MarketRequest::new(
+                    chunk.clone(),
+                    "1m",
+                    start_api.clone(),
+                    end_api.clone(),
+                    "none",
+                );
                 let rows = match api_clone.fetch_market_batch(&req).await {
                     Ok(resp) => normalize_full_kline_response(&resp, "1m"),
                     Err(err) => {
@@ -351,7 +357,7 @@ mod tests {
         fetch_minute_grouped_bars, minute_partition_key, write_minute_partition_file_local,
     };
     use crate::api::ApiClient;
-    use crate::models::{MinuteBar1m, DEFAULT_TIMEOUT_SECS};
+    use crate::models::{MinuteBar1m, DEFAULT_QMT_API_HOST, DEFAULT_TIMEOUT_SECS};
     use anyhow::Result;
     use parquet::file::reader::{FileReader, SerializedFileReader};
     use parquet::record::RowAccessor;
@@ -369,12 +375,8 @@ mod tests {
             minute_bar("600000.SH", "SH", "2026-05-24 09:31:00", 8.8),
         ];
 
-        let local_path = write_minute_partition_file_local(
-            &staging_dir,
-            "2026-05-24",
-            "SZ",
-            &bars[..2],
-        )?;
+        let local_path =
+            write_minute_partition_file_local(&staging_dir, "2026-05-24", "SZ", &bars[..2])?;
 
         let expected = staging_dir.join(minute_partition_key("2026-05-24", "SZ"));
         assert_eq!(local_path, expected);
@@ -416,7 +418,7 @@ mod tests {
     async fn real_minute_sync_stages_remote_rows_without_upload() -> Result<()> {
         dotenvy::dotenv().ok();
         let api = ApiClient::new(
-            std::env::var("QMT_API_HOST").unwrap_or_else(|_| "http://127.0.0.1:8000".to_string()),
+            std::env::var("QMT_API_HOST").unwrap_or_else(|_| DEFAULT_QMT_API_HOST.to_string()),
             std::env::var("QMT_API_AUTHORIZATION").ok(),
             std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS),
         )?;
@@ -424,7 +426,8 @@ mod tests {
         let start_date = "2025-01-02".to_string();
         let end_date = start_date.clone();
 
-        let mut grouped = fetch_minute_grouped_bars(&api, &codes, &start_date, &end_date, 20, 1).await?;
+        let mut grouped =
+            fetch_minute_grouped_bars(&api, &codes, &start_date, &end_date, 20, 1).await?;
         assert!(!grouped.is_empty(), "no remote minute rows fetched");
 
         let staging_dir = temp_dir("real-sync-minute");
@@ -435,7 +438,10 @@ mod tests {
             let path = write_minute_partition_file_local(&staging_dir, trade_date, exchange, bars)?;
             expected_by_key.insert(key.clone(), rows_from_minute_bars(bars));
             let actual = read_full_rows(&path)?;
-            assert_eq!(actual, expected_by_key[&key], "minute parquet mismatch for {key}");
+            assert_eq!(
+                actual, expected_by_key[&key],
+                "minute parquet mismatch for {key}"
+            );
         }
 
         fs::remove_dir_all(staging_dir)?;

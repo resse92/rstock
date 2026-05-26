@@ -2,15 +2,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
+pub const DEFAULT_QMT_API_HOST: &str = "http://103.85.227.158:40002";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketRequest {
+    #[serde(rename = "symbols")]
     pub stock_codes: Vec<String>,
+    #[serde(rename = "start_time")]
     pub start_date: String,
+    #[serde(rename = "end_time")]
     pub end_date: String,
     pub period: String,
     pub adjust_type: String,
     pub fill_data: bool,
+    #[serde(skip_serializing)]
     pub disable_download: bool,
 }
 

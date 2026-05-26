@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
+use crate::models::DEFAULT_QMT_API_HOST;
 use crate::sync_daily::{run_sync_daily, SyncDailyArgs};
 use crate::sync_minute::{run_sync_minute, SyncMinuteArgs};
 
@@ -54,8 +55,7 @@ impl ServerConfig {
             daily_fetch_concurrency: env_usize("DAILY_FETCH_CONCURRENCY", 8)?,
             minute_fetch_concurrency: env_usize("MINUTE_FETCH_CONCURRENCY", 4)?,
             stock_codes_file: env_var("STOCK_CODES_FILE").map(PathBuf::from),
-            base_url: env_var("QMT_API_HOST")
-                .unwrap_or_else(|| "http://127.0.0.1:8000".to_string()),
+            base_url: env_var("QMT_API_HOST").unwrap_or_else(|| DEFAULT_QMT_API_HOST.to_string()),
             authorization: env_var("QMT_API_AUTHORIZATION"),
             timeout: env_u64("QMT_API_TIMEOUT", 30)?,
             s3_bucket: env_var("S3_BUCKET").unwrap_or_else(|| "stock".to_string()),

@@ -16,7 +16,7 @@ apalis = "0.7.4"
 apalis-cron = "0.7.4"
 arrow-array = "56"
 arrow-schema = "56"
-axum = "0.7"
+axum = "0.8"
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 dotenvy = "0.15"

@@ -1,0 +1,239 @@
+syntax = "proto3";
+
+package qmt.trading;
+
+import "common.proto";
+
+message SessionInfo {
+  string session_id = 1;
+  string account_id = 2;
+  qmt.common.SecurityAccountType account_type = 3;
+  bool is_real = 4;
+  string mode = 5;
+  int64 opened_at_ms = 6;
+  string environment = 7;
+  string account_kind = 8;
+  bool orders_enabled = 9;
+  string account_profile = 10;
+}
+
+message OpenSessionRequest {
+  string account_id = 1;
+  qmt.common.SecurityAccountType account_type = 2;
+}
+
+message OpenSessionResponse {
+  SessionInfo session = 1;
+  qmt.common.Status status = 2;
+}
+
+message CloseSessionRequest {
+  string session_id = 1;
+}
+
+message CloseSessionResponse {
+  bool success = 1;
+  qmt.common.Status status = 2;
+}
+
+message GetSessionRequest {
+  string session_id = 1;
+}
+
+message GetSessionResponse {
+  SessionInfo session = 1;
+  qmt.common.Status status = 2;
+}
+
+message GetStockAssetRequest {
+  string session_id = 1;
+}
+
+message StockAsset {
+  string account_id = 1;
+  double cash = 2;
+  double frozen_cash = 3;
+  double market_value = 4;
+  double total_asset = 5;
+  double fetch_balance = 6;
+}
+
+message GetStockAssetResponse {
+  StockAsset asset = 1;
+  qmt.common.Status status = 2;
+}
+
+message GetStockPositionsRequest {
+  string session_id = 1;
+}
+
+message StockPosition {
+  string account_id = 1;
+  string stock_code = 2;
+  string instrument_name = 3;
+  int64 volume = 4;
+  int64 can_use_volume = 5;
+  int64 frozen_volume = 6;
+  int64 on_road_volume = 7;
+  int64 yesterday_volume = 8;
+  double open_price = 9;
+  double avg_price = 10;
+  double last_price = 11;
+  double market_value = 12;
+  double profit_rate = 13;
+  string direction = 14;
+  string secu_account = 15;
+}
+
+message GetStockPositionsResponse {
+  repeated StockPosition positions = 1;
+  qmt.common.Status status = 2;
+}
+
+message GetStockOrdersRequest {
+  string session_id = 1;
+  bool cancelable_only = 2;
+}
+
+message StockOrder {
+  string account_id = 1;
+  string stock_code = 2;
+  string instrument_name = 3;
+  string order_id = 4;
+  string order_sysid = 5;
+  int64 order_time_ms = 6;
+  qmt.common.OrderSide order_type = 7;
+  int64 order_volume = 8;
+  qmt.common.StockPriceType price_type = 9;
+  double price = 10;
+  int64 traded_volume = 11;
+  double traded_price = 12;
+  int32 order_status_code = 13;
+  string status_msg = 14;
+  string strategy_name = 15;
+  string order_remark = 16;
+  string direction = 17;
+  string offset_flag = 18;
+  string secu_account = 19;
+}
+
+message GetStockOrdersResponse {
+  repeated StockOrder orders = 1;
+  qmt.common.Status status = 2;
+}
+
+message GetStockTradesRequest {
+  string session_id = 1;
+}
+
+message StockTrade {
+  string account_id = 1;
+  string stock_code = 2;
+  string instrument_name = 3;
+  qmt.common.OrderSide order_type = 4;
+  string traded_id = 5;
+  int64 traded_time_ms = 6;
+  double traded_price = 7;
+  int64 traded_volume = 8;
+  double traded_amount = 9;
+  string order_id = 10;
+  string order_sysid = 11;
+  string strategy_name = 12;
+  string order_remark = 13;
+  string direction = 14;
+  string offset_flag = 15;
+  double commission = 16;
+  string secu_account = 17;
+}
+
+message GetStockTradesResponse {
+  repeated StockTrade trades = 1;
+  qmt.common.Status status = 2;
+}
+
+message SubmitStockOrderRequest {
+  string session_id = 1;
+  string stock_code = 2;
+  qmt.common.OrderSide side = 3;
+  qmt.common.StockPriceType price_type = 4;
+  int64 volume = 5;
+  double price = 6;
+  string strategy_name = 7;
+  string order_remark = 8;
+}
+
+message SubmitStockOrderResponse {
+  StockOrder order = 1;
+  qmt.common.Status status = 2;
+}
+
+message CancelBySysIdTarget {
+  string market = 1;
+  string order_sysid = 2;
+}
+
+message CancelStockOrderRequest {
+  string session_id = 1;
+  oneof target {
+    string order_id = 2;
+    CancelBySysIdTarget sysid_target = 3;
+  }
+}
+
+message CancelStockOrderResponse {
+  bool success = 1;
+  qmt.common.Status status = 2;
+}
+
+message StreamTradingEventsRequest {
+  string session_id = 1;
+}
+
+message AccountStatusEvent {
+  string account_id = 1;
+  qmt.common.SecurityAccountType account_type = 2;
+  int32 status_code = 3;
+}
+
+message OrderErrorEvent {
+  string account_id = 1;
+  string order_id = 2;
+  int32 error_id = 3;
+  string error_msg = 4;
+  string strategy_name = 5;
+  string order_remark = 6;
+}
+
+message CancelErrorEvent {
+  string account_id = 1;
+  string order_id = 2;
+  string order_sysid = 3;
+  int32 error_id = 4;
+  string error_msg = 5;
+}
+
+message TradingEvent {
+  int64 event_time_ms = 1;
+  oneof payload {
+    AccountStatusEvent account_status = 2;
+    StockAsset asset_update = 3;
+    StockOrder order_update = 4;
+    StockTrade trade_update = 5;
+    StockPosition position_update = 6;
+    OrderErrorEvent order_error = 7;
+    CancelErrorEvent cancel_error = 8;
+  }
+}
+
+service TradingService {
+  rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
+  rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
+  rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
+  rpc GetStockAsset(GetStockAssetRequest) returns (GetStockAssetResponse);
+  rpc GetStockPositions(GetStockPositionsRequest) returns (GetStockPositionsResponse);
+  rpc GetStockOrders(GetStockOrdersRequest) returns (GetStockOrdersResponse);
+  rpc GetStockTrades(GetStockTradesRequest) returns (GetStockTradesResponse);
+  rpc SubmitStockOrder(SubmitStockOrderRequest) returns (SubmitStockOrderResponse);
+  rpc CancelStockOrder(CancelStockOrderRequest) returns (CancelStockOrderResponse);
+  rpc StreamTradingEvents(StreamTradingEventsRequest) returns (stream TradingEvent);
+}

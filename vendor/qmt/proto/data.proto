@@ -1,0 +1,287 @@
+syntax = "proto3";
+
+package qmt.data;
+
+import "common.proto";
+import "google/protobuf/empty.proto";
+
+message KlineHistoryRequest {
+  repeated string symbols = 1;
+  qmt.common.QuotePeriod period = 2;
+  string start_time = 3;
+  string end_time = 4;
+  repeated string fields = 5;
+  qmt.common.AdjustType adjust_type = 6;
+  bool fill_data = 7;
+}
+
+message KlineBar {
+  int64 time_ms = 1;
+  double open = 2;
+  double high = 3;
+  double low = 4;
+  double close = 5;
+  int64 volume = 6;
+  double amount = 7;
+  double settle = 8;
+  int64 open_interest = 9;
+  double pre_close = 10;
+  int32 suspend_flag = 11;
+}
+
+message KlineSeries {
+  string symbol = 1;
+  repeated KlineBar bars = 2;
+  repeated string fields = 3;
+}
+
+message KlineHistoryResponse {
+  repeated KlineSeries items = 1;
+  qmt.common.Status status = 2;
+}
+
+message TickHistoryRequest {
+  repeated string symbols = 1;
+  string start_time = 2;
+  string end_time = 3;
+  repeated string fields = 4;
+  qmt.common.AdjustType adjust_type = 5;
+}
+
+message TickRecord {
+  int64 time_ms = 1;
+  double last_price = 2;
+  double open = 3;
+  double high = 4;
+  double low = 5;
+  double last_close = 6;
+  double amount = 7;
+  int64 volume = 8;
+  int64 pvolume = 9;
+  int64 open_int = 10;
+  int32 stock_status = 11;
+  double last_settlement_price = 12;
+  repeated double ask_price = 13;
+  repeated double bid_price = 14;
+  repeated int64 ask_vol = 15;
+  repeated int64 bid_vol = 16;
+  int64 transaction_num = 17;
+}
+
+message TickSeries {
+  string symbol = 1;
+  repeated TickRecord ticks = 2;
+  repeated string fields = 3;
+}
+
+message TickHistoryResponse {
+  repeated TickSeries items = 1;
+  qmt.common.Status status = 2;
+}
+
+message FullTickSnapshotRequest {
+  repeated string symbols = 1;
+}
+
+message FullTickSnapshot {
+  string symbol = 1;
+  TickRecord tick = 2;
+}
+
+message FullTickSnapshotResponse {
+  repeated FullTickSnapshot snapshots = 1;
+  qmt.common.Status status = 2;
+}
+
+message QuoteStreamRequest {
+  repeated string symbols = 1;
+  qmt.common.QuotePeriod period = 2;
+  string start_time = 3;
+  qmt.common.AdjustType adjust_type = 4;
+  int32 count = 5;
+}
+
+message WholeQuoteStreamRequest {
+  repeated string markets = 1;
+}
+
+message QuoteEvent {
+  string symbol = 1;
+  string period = 2;
+  int64 event_time_ms = 3;
+  oneof payload {
+    TickRecord tick = 4;
+    KlineBar kline = 5;
+  }
+}
+
+message FinancialDataRequest {
+  repeated string symbols = 1;
+  repeated string table_names = 2;
+  string start_time = 3;
+  string end_time = 4;
+  string report_type = 5;
+}
+
+message FinancialDataRow {
+  map<string, string> fields = 1;
+}
+
+message FinancialTable {
+  string symbol = 1;
+  string table_name = 2;
+  repeated string columns = 3;
+  repeated FinancialDataRow rows = 4;
+}
+
+message FinancialDataResponse {
+  repeated FinancialTable items = 1;
+  qmt.common.Status status = 2;
+}
+
+message InstrumentDetailRequest {
+  string symbol = 1;
+  bool complete = 2;
+}
+
+message InstrumentDetail {
+  string symbol = 1;
+  map<string, string> fields = 2;
+}
+
+message InstrumentDetailResponse {
+  InstrumentDetail detail = 1;
+  qmt.common.Status status = 2;
+}
+
+message TradingCalendarRequest {
+  string market = 1;
+  string start_time = 2;
+  string end_time = 3;
+}
+
+message TradingCalendarResponse {
+  string market = 1;
+  repeated string dates = 2;
+  qmt.common.Status status = 3;
+}
+
+message IndexWeightRequest {
+  string index_code = 1;
+}
+
+message IndexComponent {
+  string symbol = 1;
+  double weight = 2;
+}
+
+message IndexWeightResponse {
+  string index_code = 1;
+  repeated IndexComponent components = 2;
+  qmt.common.Status status = 3;
+}
+
+message SectorInfo {
+  string sector_name = 1;
+  repeated string symbols = 2;
+}
+
+message SectorListResponse {
+  repeated SectorInfo sectors = 1;
+  qmt.common.Status status = 2;
+}
+
+message StockListInSectorRequest {
+  string sector_name = 1;
+}
+
+message StockListInSectorResponse {
+  SectorInfo sector = 1;
+  qmt.common.Status status = 2;
+}
+
+message L2QuoteRequest {
+  repeated string symbols = 1;
+  string start_time = 2;
+  string end_time = 3;
+}
+
+message L2Quote {
+  string symbol = 1;
+  TickRecord quote = 2;
+}
+
+message L2QuoteResponse {
+  repeated L2Quote items = 1;
+  qmt.common.Status status = 2;
+}
+
+message L2OrderRequest {
+  repeated string symbols = 1;
+  string start_time = 2;
+  string end_time = 3;
+}
+
+message L2OrderRecord {
+  int64 time_ms = 1;
+  double price = 2;
+  int64 volume = 3;
+  int64 entrust_no = 4;
+  int32 entrust_type = 5;
+  int32 entrust_direction = 6;
+}
+
+message L2OrderSeries {
+  string symbol = 1;
+  repeated L2OrderRecord orders = 2;
+}
+
+message L2OrderResponse {
+  repeated L2OrderSeries items = 1;
+  qmt.common.Status status = 2;
+}
+
+message L2TransactionRequest {
+  repeated string symbols = 1;
+  string start_time = 2;
+  string end_time = 3;
+}
+
+message L2TransactionRecord {
+  int64 time_ms = 1;
+  double price = 2;
+  int64 volume = 3;
+  double amount = 4;
+  int64 trade_index = 5;
+  int64 buy_no = 6;
+  int64 sell_no = 7;
+  int32 trade_type = 8;
+  int32 trade_flag = 9;
+}
+
+message L2TransactionSeries {
+  string symbol = 1;
+  repeated L2TransactionRecord transactions = 2;
+}
+
+message L2TransactionResponse {
+  repeated L2TransactionSeries items = 1;
+  qmt.common.Status status = 2;
+}
+
+service DataService {
+  rpc GetKlineHistory(KlineHistoryRequest) returns (KlineHistoryResponse);
+  rpc GetTickHistory(TickHistoryRequest) returns (TickHistoryResponse);
+  rpc GetFullTickSnapshot(FullTickSnapshotRequest) returns (FullTickSnapshotResponse);
+  rpc GetFinancialData(FinancialDataRequest) returns (FinancialDataResponse);
+  rpc GetInstrumentDetail(InstrumentDetailRequest) returns (InstrumentDetailResponse);
+  rpc GetTradingCalendar(TradingCalendarRequest) returns (TradingCalendarResponse);
+  rpc GetIndexWeight(IndexWeightRequest) returns (IndexWeightResponse);
+  rpc GetSectorList(google.protobuf.Empty) returns (SectorListResponse);
+  rpc GetStockListInSector(StockListInSectorRequest) returns (StockListInSectorResponse);
+  rpc GetL2Quote(L2QuoteRequest) returns (L2QuoteResponse);
+  rpc GetL2Order(L2OrderRequest) returns (L2OrderResponse);
+  rpc GetL2Transaction(L2TransactionRequest) returns (L2TransactionResponse);
+  rpc StreamQuote(QuoteStreamRequest) returns (stream QuoteEvent);
+  rpc StreamWholeQuote(WholeQuoteStreamRequest) returns (stream QuoteEvent);
+}

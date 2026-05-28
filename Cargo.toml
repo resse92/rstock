@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace]
-members = ["tools/zip-csv-to-parquet"]
+members = ["tools/zip-csv-to-parquet", "vendor/qmt"]
 
 [[bin]]
 name = "rstock"

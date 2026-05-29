@@ -21,8 +21,11 @@ pub struct LimitUpPullbackDetector {
     pub lookback_days: usize,
     pub limit_up_threshold: f64,
     pub volume_ratio_threshold: f64,
+    pub min_pullback_days: usize,
     pub max_pullback_days: usize,
     pub support_ratio: f64,
+    pub resistance_ratio: f64,
+    pub volume_shrinkage_ratio: f64,
 }
 
 impl Default for LimitUpPullbackDetector {
@@ -30,9 +33,12 @@ impl Default for LimitUpPullbackDetector {
         Self {
             lookback_days: 6,
             limit_up_threshold: 0.095,
-            volume_ratio_threshold: 2.0,
+            volume_ratio_threshold: 2.2,
+            min_pullback_days: 1,
             max_pullback_days: 9,
             support_ratio: 0.95,
+            resistance_ratio: 1.05,
+            volume_shrinkage_ratio: 0.5,
         }
     }
 }
@@ -42,7 +48,7 @@ impl PatternDetector for LimitUpPullbackDetector {
         "limit_up_pullback"
     }
 
-    fn detect(&self, series: &BarSeries, _indicators: &SeriesIndicators) -> Option<PatternSignal> {
+    fn detect(&self, series: &BarSeries, indicators: &SeriesIndicators) -> Option<PatternSignal> {
         let bars = &series.bars;
         if bars.len() < 12 {
             return None;
@@ -71,20 +77,61 @@ impl PatternDetector for LimitUpPullbackDetector {
             }
 
             let pullback_days = latest_idx - limit_idx;
-            if pullback_days == 0 || pullback_days > self.max_pullback_days {
+            if pullback_days < self.min_pullback_days || pullback_days > self.max_pullback_days {
                 continue;
             }
 
-            let lowest_low = window_low(bars, limit_idx + 1, latest_idx);
+            let pullback_start = limit_idx + 1;
+            let lowest_low = window_low(bars, pullback_start, latest_idx);
             if lowest_low < bars[limit_idx].close * self.support_ratio {
                 continue;
             }
 
-            let highest_high = window_high(bars, limit_idx + 1, latest_idx);
+            let highest_high = window_high(bars, pullback_start, latest_idx);
             let pullback_range = (highest_high - lowest_low) / highest_high.max(1e-6);
-            if pullback_range > 0.15 || !is_bullish(&bars[latest_idx]) {
+            if pullback_range > 0.15 {
                 continue;
             }
+
+            let pullback_closes: Vec<f64> = bars[pullback_start..=latest_idx]
+                .iter()
+                .map(|bar| bar.close)
+                .collect();
+            if pullback_closes
+                .iter()
+                .any(|close| *close < bars[limit_idx].close * self.support_ratio)
+            {
+                continue;
+            }
+            if pullback_closes
+                .iter()
+                .any(|close| *close > bars[limit_idx].close * self.resistance_ratio)
+            {
+                continue;
+            }
+            if pullback_closes
+                .iter()
+                .all(|close| *close >= bars[limit_idx].close)
+            {
+                continue;
+            }
+            let shrink_threshold = bars[limit_idx].volume * self.volume_shrinkage_ratio;
+            if bars[pullback_start..=latest_idx]
+                .iter()
+                .all(|bar| bar.volume > shrink_threshold)
+            {
+                continue;
+            }
+            if !is_bullish(&bars[latest_idx]) {
+                continue;
+            }
+
+            let vol_ratio = indicators
+                .volume_ma5
+                .get(latest_idx)
+                .and_then(|value| *value)
+                .map(|value| bars[latest_idx].volume / value.max(1e-6))
+                .unwrap_or(0.0);
 
             return Some(signal(
                 self.id(),
@@ -98,6 +145,8 @@ impl PatternDetector for LimitUpPullbackDetector {
                     "pullback_days": pullback_days,
                     "pullback_range": pullback_range,
                     "volume_ratio": bars[limit_idx].volume / baseline_volume,
+                    "support_price": bars[limit_idx].close * self.support_ratio,
+                    "latest_volume_ratio": vol_ratio,
                 }),
             ));
         }

@@ -41,11 +41,12 @@ impl PatternDetector for Strategy2560SelectionDetector {
         let price_change = (latest.close - prev.close) / prev.close.max(1e-6);
         let price_break = latest.close > ma25 && prev.close <= prev_ma25;
         let vol_cross = vol_ma5 > vol_ma60 && prev_vol_ma5 <= prev_vol_ma60;
+        let volume_ratio = latest.volume / vol_ma5.max(1e-6);
         if price_break
             && vol_cross
             && latest.close > ma10
             && price_change >= 0.05
-            && latest.volume >= vol_ma5 * 1.2
+            && volume_ratio >= 1.2
         {
             return Some(signal(
                 self.id(),
@@ -58,7 +59,9 @@ impl PatternDetector for Strategy2560SelectionDetector {
                     "ma25": ma25,
                     "ma10": ma10,
                     "price_change_pct": price_change,
-                    "volume_ratio": latest.volume / vol_ma5,
+                    "close": latest.close,
+                    "prev_close": prev.close,
+                    "volume_ratio": volume_ratio,
                     "vol_ma5": vol_ma5,
                     "vol_ma60": vol_ma60,
                 }),

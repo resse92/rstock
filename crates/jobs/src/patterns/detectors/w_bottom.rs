@@ -11,7 +11,7 @@
 
 use serde_json::json;
 
-use super::common::{signal, window_high};
+use super::common::{pct_change, signal, window_high};
 use super::PatternDetector;
 use crate::patterns::indicators::SeriesIndicators;
 use crate::patterns::model::{BarSeries, PatternSignal};
@@ -59,13 +59,52 @@ impl PatternDetector for WBottomDetector {
         if neckline < bars[l1].low * 1.1 {
             return None;
         }
-        let breakout = bars[latest_idx].close >= neckline * 1.01
-            && bars[latest_idx].volume >= indicators.volume_ma5[latest_idx]? * 1.2
-            && (bars[latest_idx].close - bars[latest_idx - 1].close)
-                / bars[latest_idx - 1].close.max(1e-6)
-                > 0.08;
+
+        let mut break_idx = None;
+        let break_search_start = end.saturating_sub(5);
+        for idx in break_search_start..end {
+            let change = pct_change(bars, idx)?;
+            let vol_ma = indicators.volume_ma5[idx]?;
+            if change > 0.08
+                && bars[idx].volume >= vol_ma * 1.2
+                && bars[idx].close >= neckline * 1.01
+                && idx > 0
+                && bars[idx - 1].close < neckline
+            {
+                break_idx = Some(idx);
+                break;
+            }
+        }
+        let break_idx = break_idx?;
+
         let trend_ok = indicators.ma10[latest_idx]? > indicators.ma30[latest_idx]?;
-        if breakout && trend_ok {
+        if !trend_ok {
+            return None;
+        }
+
+        let before_start = l1.saturating_add(1);
+        let before_end = (l1 + 31).min(end);
+        if before_start >= before_end {
+            return None;
+        }
+        let max_high_before_l1 = bars[before_start..before_end]
+            .iter()
+            .map(|bar| bar.high)
+            .fold(f64::NEG_INFINITY, f64::max);
+        if max_high_before_l1 <= bars[l1].low * 1.2 {
+            return None;
+        }
+
+        let support_price = neckline * 0.98;
+        if break_idx < latest_idx
+            && bars[break_idx + 1..=latest_idx]
+                .iter()
+                .any(|bar| bar.close < support_price)
+        {
+            return None;
+        }
+
+        if break_idx >= latest_idx.saturating_sub(20) {
             return Some(signal(
                 self.id(),
                 series,
@@ -76,8 +115,11 @@ impl PatternDetector for WBottomDetector {
                 json!({
                     "left_bottom_date": bars[l1].time.format("%Y-%m-%d").to_string(),
                     "right_bottom_date": bars[l2].time.format("%Y-%m-%d").to_string(),
+                    "break_date": bars[break_idx].time.format("%Y-%m-%d").to_string(),
                     "neckline": neckline,
                     "bottom_diff_ratio": diff,
+                    "break_volume_ratio": bars[break_idx].volume / indicators.volume_ma5[break_idx]?.max(1e-6),
+                    "support_price": support_price,
                 }),
             ));
         }

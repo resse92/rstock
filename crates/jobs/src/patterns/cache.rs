@@ -19,7 +19,7 @@ impl DuckDbPatternCache {
     }
 
     pub fn latest_dates(&self, symbols: &[String]) -> Result<HashMap<String, NaiveDate>> {
-        let mut conn = self.open()?;
+        let conn = self.open()?;
         let mut stmt = conn.prepare(
             "SELECT symbol, MAX(trade_date) AS latest_date
              FROM daily_bars
@@ -89,7 +89,7 @@ impl DuckDbPatternCache {
         start_date: NaiveDate,
         end_date: NaiveDate,
     ) -> Result<Vec<BarSeries>> {
-        let mut conn = self.open()?;
+        let conn = self.open()?;
         let mut stmt = conn.prepare(
             "SELECT symbol, exchange, trade_date, open, high, low, close, volume, amount, source
              FROM daily_bars
@@ -135,7 +135,7 @@ impl DuckDbPatternCache {
     }
 
     pub fn cleanup(&self) -> Result<()> {
-        let mut conn = self.open()?;
+        let conn = self.open()?;
         let cutoff = (Utc::now().date_naive() - Duration::days(self.config.retention_days))
             .format("%Y-%m-%d")
             .to_string();

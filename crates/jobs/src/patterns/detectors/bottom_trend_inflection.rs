@@ -49,12 +49,6 @@ impl PatternDetector for BottomTrendInflectionDetector {
         if decline < 0.45 {
             return None;
         }
-        let latest_idx = end - 1;
-        let latest_change = pct_change(bars, latest_idx)?;
-        let vol_ma10 = indicators.volume_ma10[latest_idx]?;
-        if latest_change < 0.08 || bars[latest_idx].volume < vol_ma10 * 2.5 {
-            return None;
-        }
         let recent_slice = end.saturating_sub(20);
         let recent_lows: Vec<f64> = bars[recent_slice..end].iter().map(|bar| bar.low).collect();
         let recent_macd: Vec<f64> = indicators.macd_hist[recent_slice..end]
@@ -66,20 +60,54 @@ impl PatternDetector for BottomTrendInflectionDetector {
         if !(price_reg.0 < 0.0 && macd_reg.0 > price_reg.0) {
             return None;
         }
-        Some(signal(
-            self.id(),
-            series,
-            bars[latest_idx].time,
-            0.78,
-            &["bottom", "reversal"],
-            "半年深跌后出现放量反弹，价格创新低力度减弱且MACD出现底背离迹象。",
-            json!({
-                "decline_ratio": decline,
-                "latest_change_pct": latest_change,
-                "volume_ratio": bars[latest_idx].volume / vol_ma10,
-                "price_slope": price_reg.0,
-                "macd_slope": macd_reg.0,
-            }),
-        ))
+
+        let surge_window_start = end.saturating_sub(10);
+        for surge_idx in (surge_window_start..end).rev() {
+            let day_change = pct_change(bars, surge_idx)?;
+            let vol_ma10 = indicators.volume_ma10[surge_idx]?;
+            if day_change <= 0.08 || bars[surge_idx].volume < vol_ma10 * 2.5 {
+                continue;
+            }
+
+            let lowest_price = bars[start..end]
+                .iter()
+                .map(|bar| bar.low)
+                .fold(f64::INFINITY, f64::min);
+            let distance_ratio = (bars[surge_idx].close - lowest_price) / lowest_price.max(1e-6);
+            if distance_ratio > 0.15 {
+                continue;
+            }
+
+            let support_price = bars[surge_idx].open;
+            let after_surge_start = surge_idx.saturating_add(1);
+            if after_surge_start < end
+                && bars[after_surge_start..end]
+                    .iter()
+                    .any(|bar| bar.low < support_price)
+            {
+                continue;
+            }
+
+            return Some(signal(
+                self.id(),
+                series,
+                bars[end - 1].time,
+                0.78,
+                &["bottom", "reversal"],
+                "半年深跌后出现放量反弹，价格创新低力度减弱且MACD出现底背离迹象。",
+                json!({
+                    "decline_ratio": decline,
+                    "surge_date": bars[surge_idx].time.format("%Y-%m-%d").to_string(),
+                    "surge_change_pct": day_change,
+                    "volume_ratio": bars[surge_idx].volume / vol_ma10,
+                    "distance_from_low": distance_ratio,
+                    "support_price": support_price,
+                    "price_slope": price_reg.0,
+                    "macd_slope": macd_reg.0,
+                }),
+            ));
+        }
+
+        None
     }
 }

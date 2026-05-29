@@ -57,10 +57,22 @@ impl PatternDetector for MultiGoldenCrossDetector {
         let min_day = ma_day.min(kdj_day).min(macd_day);
         let max_day = ma_day.max(kdj_day).max(macd_day);
         let latest = &series.bars[idx];
+        let ma5 = indicators.ma5[idx]?;
+        let ma20 = indicators.ma20[idx]?;
+        let k = indicators.k[idx]?;
+        let d = indicators.d[idx]?;
+        let j = indicators.j[idx]?;
+        let dif = indicators.dif[idx]?;
+        let dea = indicators.dea[idx]?;
+        let macd = indicators.macd_hist[idx]?;
+        let vol_ma5 = indicators.volume_ma5[idx]?;
+        let short_trend = indicators.short_trend[idx]?;
+        let bull_bear = indicators.bull_bear_line[idx]?;
+        let volume_ratio = latest.volume / vol_ma5.max(1e-6);
         if max_day - min_day <= 1
-            && latest.close > indicators.ma5[idx]?
-            && latest.close > indicators.ma20[idx]?
-            && latest.volume > indicators.volume_ma5[idx]?
+            && latest.close > ma5
+            && latest.close > ma20
+            && volume_ratio >= 1.0
         {
             return Some(signal(
                 self.id(),
@@ -70,10 +82,22 @@ impl PatternDetector for MultiGoldenCrossDetector {
                 &["golden-cross", "resonance"],
                 "均线、KDJ、MACD 在短周期内形成多金叉共振。",
                 json!({
+                    "key_date": series.bars[min_day].time.format("%Y-%m-%d").to_string(),
                     "ma_cross_date": series.bars[ma_day].time.format("%Y-%m-%d").to_string(),
                     "kdj_cross_date": series.bars[kdj_day].time.format("%Y-%m-%d").to_string(),
                     "macd_cross_date": series.bars[macd_day].time.format("%Y-%m-%d").to_string(),
                     "max_gap_days": max_day - min_day,
+                    "ma5": ma5,
+                    "ma20": ma20,
+                    "k": k,
+                    "d": d,
+                    "j": j,
+                    "dif": dif,
+                    "dea": dea,
+                    "macd": macd,
+                    "volume_ratio": volume_ratio,
+                    "short_term_trend": short_trend,
+                    "bull_bear_line": bull_bear,
                 }),
             ));
         }

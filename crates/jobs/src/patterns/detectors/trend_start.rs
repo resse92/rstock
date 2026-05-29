@@ -39,10 +39,11 @@ impl PatternDetector for TrendStartDetector {
         let boll_yesterday = indicators.boll_mid[idx - 1]?;
         let ma5 = indicators.ma5[idx]?;
         let volume_ma5 = indicators.volume_ma5[idx]?;
+        let volume_ratio = today.volume / volume_ma5.max(1e-6);
 
         let macd_cross = dif_today > 0.0 && dif_yesterday <= dea_yesterday && dif_today > dea_today;
         let boll_cross = yesterday.close < boll_yesterday && today.close > boll_today;
-        let volume_ok = today.volume > volume_ma5 * 1.2;
+        let volume_ok = volume_ratio > 1.2;
         if macd_cross && boll_cross && is_bullish(today) && today.close > ma5 && volume_ok {
             return Some(signal(
                 self.id(),
@@ -56,7 +57,8 @@ impl PatternDetector for TrendStartDetector {
                     "dea": dea_today,
                     "boll_mid": boll_today,
                     "ma5": ma5,
-                    "volume_ratio": today.volume / volume_ma5,
+                    "close": today.close,
+                    "volume_ratio": volume_ratio,
                 }),
             ));
         }

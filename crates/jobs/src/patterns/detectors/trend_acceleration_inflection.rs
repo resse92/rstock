@@ -58,11 +58,12 @@ impl PatternDetector for TrendAccelerationInflectionDetector {
             if distance > 0.15 {
                 continue;
             }
+            let support_price = bars[surge_idx].open;
             if bars[surge_idx..=latest_idx]
                 .iter()
                 .map(|bar| bar.low)
                 .fold(f64::INFINITY, f64::min)
-                < bars[surge_idx].open
+                < support_price
             {
                 continue;
             }
@@ -78,6 +79,7 @@ impl PatternDetector for TrendAccelerationInflectionDetector {
                     "trend_r2": r2,
                     "surge_date": bars[surge_idx].time.format("%Y-%m-%d").to_string(),
                     "distance_from_low": distance,
+                    "support_price": support_price,
                     "volume_ratio": bars[surge_idx].volume / vol_ma,
                 }),
             ));

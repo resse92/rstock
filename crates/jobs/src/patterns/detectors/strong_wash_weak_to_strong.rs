@@ -30,6 +30,7 @@ impl PatternDetector for StrongWashWeakToStrongDetector {
             return None;
         }
         let end = bars.len();
+        let latest_idx = end - 1;
         for big_idx in (end.saturating_sub(6)..end.saturating_sub(2)).rev() {
             let big_change = pct_change(bars, big_idx)?;
             let big_vol_ma = indicators.volume_ma5[big_idx]?;
@@ -56,9 +57,19 @@ impl PatternDetector for StrongWashWeakToStrongDetector {
                 {
                     continue;
                 }
+                if latest_idx.saturating_sub(reversal_idx) > 5 {
+                    continue;
+                }
+                if reversal_idx < latest_idx
+                    && bars[reversal_idx + 1..end]
+                        .iter()
+                        .any(|bar| bar.close <= bars[big_idx].close)
+                {
+                    continue;
+                }
                 if bars[reversal_idx..end]
                     .iter()
-                    .any(|bar| bar.close < bars[big_idx].close)
+                    .any(|bar| bar.close <= bars[big_idx].close)
                 {
                     continue;
                 }
@@ -73,6 +84,9 @@ impl PatternDetector for StrongWashWeakToStrongDetector {
                         "big_candle_date": bars[big_idx].time.format("%Y-%m-%d").to_string(),
                         "wash_date": bars[wash_idx].time.format("%Y-%m-%d").to_string(),
                         "reversal_date": bars[reversal_idx].time.format("%Y-%m-%d").to_string(),
+                        "big_candle_volume_ratio": bars[big_idx].volume / big_vol_ma.max(1e-6),
+                        "wash_volume_ratio": bars[wash_idx].volume / bars[big_idx].volume.max(1e-6),
+                        "days_after_reversal": latest_idx - reversal_idx,
                     }),
                 ));
             }

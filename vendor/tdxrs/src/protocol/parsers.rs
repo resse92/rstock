@@ -1175,7 +1175,7 @@ mod tests {
     #[test]
     fn test_xdxr_zero_count() {
         // 9 bytes header + 2 bytes count=0
-        let mut data = vec![0u8; 11];
+        let data = vec![0u8; 11];
         let result = parse_xdxr_info(&data).unwrap();
         assert!(result.is_empty());
     }

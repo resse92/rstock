@@ -731,7 +731,10 @@ fn month_windows(start_compact: &str, end_compact: &str) -> Result<Vec<(String, 
 
 #[cfg(test)]
 mod tests {
-    use super::{dedup_daily_rows, fetch_daily_bars_with_fallback, stage_daily_bars_local};
+    use super::{
+        dedup_daily_rows, fetch_daily_bars_with_fallback, stage_daily_bars_local,
+        write_daily_partition_file_local,
+    };
     use crate::api::ApiClient;
     use crate::models::{DailyBar, DEFAULT_QMT_API_HOST, DEFAULT_TIMEOUT_SECS};
     use anyhow::Result;

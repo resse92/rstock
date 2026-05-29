@@ -1,0 +1,86 @@
+//! W 底形态识别。
+//!
+//! 目标：
+//! 识别双底结构完成后，股价放量突破颈线的反转信号。
+//!
+//! 当前实现：
+//! 1. 在最近 40 根K线中扫描局部低点，提取左右两个底部候选。
+//! 2. 两个底部之间必须有足够时间间隔，且低点价差不能过大。
+//! 3. 取两个低点之间的最高价近似为颈线，并要求颈线有足够高度。
+//! 4. 最新日如果以放量方式突破颈线，且短中期均线转强，则认定为 W 底完成。
+
+use serde_json::json;
+
+use super::common::{signal, window_high};
+use super::PatternDetector;
+use crate::patterns::indicators::SeriesIndicators;
+use crate::patterns::model::{BarSeries, PatternSignal};
+
+#[derive(Debug, Clone, Default)]
+pub struct WBottomDetector;
+
+impl PatternDetector for WBottomDetector {
+    fn id(&self) -> &'static str {
+        "w_bottom"
+    }
+
+    fn detect(&self, series: &BarSeries, indicators: &SeriesIndicators) -> Option<PatternSignal> {
+        let bars = &series.bars;
+        if bars.len() < 40 {
+            return None;
+        }
+        let end = bars.len();
+        let latest_idx = end - 1;
+        let scan_start = end.saturating_sub(40);
+        let mut lows = Vec::new();
+        for idx in scan_start + 2..latest_idx.saturating_sub(5) {
+            let low = bars[idx].low;
+            if low <= bars[idx - 1].low
+                && low <= bars[idx - 2].low
+                && low <= bars[idx + 1].low
+                && low <= bars[idx + 2].low
+            {
+                lows.push(idx);
+            }
+        }
+        if lows.len() < 2 {
+            return None;
+        }
+        let l1 = lows[lows.len() - 2];
+        let l2 = lows[lows.len() - 1];
+        if l2 <= l1 + 10 {
+            return None;
+        }
+        let diff = (bars[l1].low - bars[l2].low).abs() / bars[l1].low.max(1e-6);
+        if diff > 0.03 {
+            return None;
+        }
+        let neckline = window_high(bars, l1, l2);
+        if neckline < bars[l1].low * 1.1 {
+            return None;
+        }
+        let breakout = bars[latest_idx].close >= neckline * 1.01
+            && bars[latest_idx].volume >= indicators.volume_ma5[latest_idx]? * 1.2
+            && (bars[latest_idx].close - bars[latest_idx - 1].close)
+                / bars[latest_idx - 1].close.max(1e-6)
+                > 0.08;
+        let trend_ok = indicators.ma10[latest_idx]? > indicators.ma30[latest_idx]?;
+        if breakout && trend_ok {
+            return Some(signal(
+                self.id(),
+                series,
+                bars[latest_idx].time,
+                0.79,
+                &["double-bottom", "breakout"],
+                "双底结构完成后在近端放量突破颈线。",
+                json!({
+                    "left_bottom_date": bars[l1].time.format("%Y-%m-%d").to_string(),
+                    "right_bottom_date": bars[l2].time.format("%Y-%m-%d").to_string(),
+                    "neckline": neckline,
+                    "bottom_diff_ratio": diff,
+                }),
+            ));
+        }
+        None
+    }
+}

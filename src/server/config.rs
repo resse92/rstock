@@ -25,6 +25,11 @@ pub struct ServerConfig {
     pub s3_access_key: Option<String>,
     pub s3_secret_key: Option<String>,
     pub s3_host: Option<String>,
+    pub pattern_cache_db_path: PathBuf,
+    pub pattern_cache_retention_days: i64,
+    pub pattern_cache_max_bars: usize,
+    pub pattern_adjust_type: String,
+    pub pattern_tdx_fallback: bool,
 }
 
 impl ServerConfig {
@@ -36,11 +41,7 @@ impl ServerConfig {
             .with_context(|| format!("解析 TOML 配置失败: {}", path.display()))?;
 
         Ok(Self {
-            bind: config
-                .server
-                .bind
-                .parse()
-                .context("server.bind 格式错误")?,
+            bind: config.server.bind.parse().context("server.bind 格式错误")?,
             daily_cron: config.server.daily_cron,
             minute_cron: config.server.minute_cron,
             daily_chunk_size: config.sync.daily.chunk_size,
@@ -58,6 +59,11 @@ impl ServerConfig {
             s3_access_key: empty_to_none(config.s3.access_key),
             s3_secret_key: empty_to_none(config.s3.secret_key),
             s3_host: Some(config.s3.host),
+            pattern_cache_db_path: config.patterns.cache.db_path,
+            pattern_cache_retention_days: config.patterns.cache.retention_days,
+            pattern_cache_max_bars: config.patterns.cache.max_bars,
+            pattern_adjust_type: config.patterns.adjust_type,
+            pattern_tdx_fallback: config.patterns.tdx_fallback,
         })
     }
 }
@@ -83,6 +89,8 @@ struct RootConfig {
     s3: S3Section,
     #[serde(default)]
     sync: SyncSection,
+    #[serde(default)]
+    patterns: PatternSection,
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,6 +172,46 @@ impl Default for SyncSection {
         Self {
             daily: DailySyncSection::default(),
             minute: MinuteSyncSection::default(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PatternSection {
+    #[serde(default = "default_pattern_adjust_type")]
+    adjust_type: String,
+    #[serde(default = "default_pattern_tdx_fallback")]
+    tdx_fallback: bool,
+    #[serde(default)]
+    cache: PatternCacheSection,
+}
+
+impl Default for PatternSection {
+    fn default() -> Self {
+        Self {
+            adjust_type: default_pattern_adjust_type(),
+            tdx_fallback: default_pattern_tdx_fallback(),
+            cache: PatternCacheSection::default(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PatternCacheSection {
+    #[serde(default = "default_pattern_cache_db_path")]
+    db_path: PathBuf,
+    #[serde(default = "default_pattern_cache_retention_days")]
+    retention_days: i64,
+    #[serde(default = "default_pattern_cache_max_bars")]
+    max_bars: usize,
+}
+
+impl Default for PatternCacheSection {
+    fn default() -> Self {
+        Self {
+            db_path: default_pattern_cache_db_path(),
+            retention_days: default_pattern_cache_retention_days(),
+            max_bars: default_pattern_cache_max_bars(),
         }
     }
 }
@@ -256,4 +304,24 @@ fn default_minute_chunk_size() -> usize {
 
 fn default_minute_fetch_concurrency() -> usize {
     4
+}
+
+fn default_pattern_adjust_type() -> String {
+    "qfq".to_string()
+}
+
+fn default_pattern_tdx_fallback() -> bool {
+    true
+}
+
+fn default_pattern_cache_db_path() -> PathBuf {
+    PathBuf::from("data/cache/patterns.duckdb")
+}
+
+fn default_pattern_cache_retention_days() -> i64 {
+    540
+}
+
+fn default_pattern_cache_max_bars() -> usize {
+    3_000_000
 }

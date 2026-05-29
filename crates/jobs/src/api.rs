@@ -2,17 +2,18 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
-use reqwest::{Client, Method};
-use serde_json::Value;
+use chrono::{TimeZone, Utc};
+use qmt::common::{AdjustType, QuotePeriod, Status as QmtStatus};
+use qmt::data::{KlineHistoryRequest, SectorListResponse};
+use qmt::QmtClient;
+use serde_json::{json, Map, Value};
+use tonic::transport::Endpoint;
 
 use crate::models::MarketRequest;
 
 #[derive(Debug, Clone)]
 pub struct ApiClient {
-    base_url: String,
-    authorization: Option<String>,
-    client: Client,
+    client: QmtClient,
 }
 
 impl ApiClient {
@@ -21,102 +22,167 @@ impl ApiClient {
         authorization: Option<String>,
         timeout: Duration,
     ) -> Result<Self> {
-        let client = Client::builder().timeout(timeout).build()?;
-        let authorization = authorization.map(|v| {
-            if v.to_ascii_lowercase().starts_with("bearer ") {
-                v
-            } else {
-                format!("Bearer {v}")
-            }
-        });
-        let base_url = normalize_base_url(&base_url.into());
-        Ok(Self {
-            base_url,
-            authorization,
-            client,
-        })
-    }
-
-    pub async fn request_json(
-        &self,
-        method: Method,
-        path: &str,
-        payload: Option<Value>,
-    ) -> Result<Value> {
-        let url = format!("{}{}", self.base_url, path);
-        let mut req = self
-            .client
-            .request(method.clone(), &url)
-            .header(ACCEPT, "application/json");
-
-        if let Some(auth) = &self.authorization {
-            req = req.header(AUTHORIZATION, auth);
-        }
-
-        if let Some(body) = payload {
-            req = req.header(CONTENT_TYPE, "application/json").json(&body);
-        }
-
-        let resp = req
-            .send()
-            .await
-            .with_context(|| format!("request failed: {method} {path}"))?;
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            return Err(anyhow!(
-                "HTTP {} calling {} {}: {}",
-                status,
-                method,
-                path,
-                text
-            ));
-        }
-
-        if text.trim().is_empty() {
-            return Ok(Value::Null);
-        }
-
-        serde_json::from_str(&text)
-            .with_context(|| format!("invalid json from {} {}: {}", method, path, text))
+        let endpoint = Endpoint::from_shared(normalize_base_url(&base_url.into()))?.timeout(timeout);
+        let client = QmtClient::from_endpoint_with_authorization(endpoint, authorization)
+            .map_err(|err| anyhow!("failed to initialize qmt grpc client: {err}"))?;
+        Ok(Self { client })
     }
 
     pub async fn fetch_market_batch(&self, req: &MarketRequest) -> Result<Value> {
-        self.request_json(
-            Method::POST,
-            "/api/v1/data/kline-history",
-            Some(serde_json::to_value(req)?),
-        )
-        .await
+        let request = KlineHistoryRequest {
+            symbols: req.stock_codes.clone(),
+            period: map_quote_period(&req.period)? as i32,
+            start_time: req.start_date.clone(),
+            end_time: req.end_date.clone(),
+            fields: Vec::new(),
+            adjust_type: map_adjust_type(&req.adjust_type)? as i32,
+            fill_data: req.fill_data,
+        };
+
+        let response = self
+            .client
+            .data()
+            .get_kline_history(request)
+            .await
+            .context("调用 gRPC GetKlineHistory 失败")?
+            .into_inner();
+
+        ensure_status_ok(response.status.as_ref(), "GetKlineHistory")?;
+        Ok(kline_response_to_json(&req.period, response))
     }
 
     pub async fn fetch_sectors(&self) -> Result<Value> {
-        self.request_json(Method::GET, "/api/v1/data/sectors", None)
+        let response = self
+            .client
+            .data()
+            .get_sector_list(())
             .await
+            .context("调用 gRPC GetSectorList 失败")?
+            .into_inner();
+
+        ensure_status_ok(response.status.as_ref(), "GetSectorList")?;
+        Ok(sector_response_to_json(response))
     }
 
     pub async fn discover_all_stock_codes(&self) -> Result<Vec<String>> {
-        let v = self
-            .fetch_sectors()
-            .await
-            .context("调用 /api/v1/data/sectors 失败")?;
+        let v = self.fetch_sectors().await.context("调用 GetSectorList 失败")?;
         let codes: BTreeSet<String> = extract_stock_list(&v)
             .into_iter()
             .filter(|code| is_hsba_a_share(code))
             .collect();
         if codes.is_empty() {
-            return Err(anyhow!("/api/v1/data/sectors 未返回任何沪深京A股代码"));
+            return Err(anyhow!("GetSectorList 未返回任何沪深京A股代码"));
         }
         Ok(codes.into_iter().collect())
     }
 }
 
+fn ensure_status_ok(status: Option<&QmtStatus>, action: &str) -> Result<()> {
+    match status {
+        None => Ok(()),
+        Some(status) if status.code == 0 => Ok(()),
+        Some(status) => Err(anyhow!(
+            "{action} failed: code={}, message={}",
+            status.code,
+            status.message
+        )),
+    }
+}
+
 fn normalize_base_url(raw: &str) -> String {
-    raw.trim()
-        .trim_end_matches("/openapi.json")
-        .trim_end_matches('/')
-        .to_string()
+    let trimmed = raw.trim();
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{trimmed}")
+    }
+}
+
+fn map_quote_period(period: &str) -> Result<QuotePeriod> {
+    match period.trim().to_ascii_lowercase().as_str() {
+        "tick" => Ok(QuotePeriod::Tick),
+        "1m" => Ok(QuotePeriod::QuotePeriod1m),
+        "5m" => Ok(QuotePeriod::QuotePeriod5m),
+        "15m" => Ok(QuotePeriod::QuotePeriod15m),
+        "30m" => Ok(QuotePeriod::QuotePeriod30m),
+        "1h" => Ok(QuotePeriod::QuotePeriod1h),
+        "1d" => Ok(QuotePeriod::QuotePeriod1d),
+        "1w" => Ok(QuotePeriod::QuotePeriod1w),
+        "1mon" | "1mo" => Ok(QuotePeriod::QuotePeriod1mon),
+        "1q" => Ok(QuotePeriod::QuotePeriod1q),
+        "1hy" => Ok(QuotePeriod::QuotePeriod1hy),
+        "1y" => Ok(QuotePeriod::QuotePeriod1y),
+        other => Err(anyhow!("unsupported qmt period: {other}")),
+    }
+}
+
+fn map_adjust_type(adjust_type: &str) -> Result<AdjustType> {
+    match adjust_type.trim().to_ascii_lowercase().as_str() {
+        "" | "none" => Ok(AdjustType::None),
+        "front" | "qfq" => Ok(AdjustType::Front),
+        "back" | "hfq" => Ok(AdjustType::Back),
+        "front_ratio" => Ok(AdjustType::FrontRatio),
+        "back_ratio" => Ok(AdjustType::BackRatio),
+        other => Err(anyhow!("unsupported qmt adjust_type: {other}")),
+    }
+}
+
+fn kline_response_to_json(period: &str, response: qmt::data::KlineHistoryResponse) -> Value {
+    let mut root = Map::new();
+    for item in response.items {
+        let bars = item
+            .bars
+            .into_iter()
+            .map(|bar| {
+                json!({
+                    "time": format_time_ms(period, bar.time_ms),
+                    "open": bar.open,
+                    "high": bar.high,
+                    "low": bar.low,
+                    "close": bar.close,
+                    "volume": bar.volume,
+                    "amount": bar.amount,
+                    "settle": bar.settle,
+                    "openInterest": bar.open_interest,
+                    "preClose": bar.pre_close,
+                    "suspendFlag": bar.suspend_flag,
+                })
+            })
+            .collect::<Vec<_>>();
+        root.insert(item.symbol, Value::Array(bars));
+    }
+    Value::Object(root)
+}
+
+fn sector_response_to_json(response: SectorListResponse) -> Value {
+    Value::Array(
+        response
+            .sectors
+            .into_iter()
+            .map(|sector| {
+                json!({
+                    "sector_name": sector.sector_name,
+                    "stock_list": sector.symbols,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn format_time_ms(period: &str, time_ms: i64) -> String {
+    if let Some(dt) = Utc.timestamp_millis_opt(time_ms).single() {
+        let local = dt.with_timezone(
+            &chrono::FixedOffset::east_opt(8 * 3600).expect("valid china timezone offset"),
+        );
+        match period.trim().to_ascii_lowercase().as_str() {
+            "1d" | "1w" | "1mon" | "1mo" | "1q" | "1hy" | "1y" => {
+                local.format("%Y-%m-%d").to_string()
+            }
+            _ => local.format("%Y-%m-%d %H:%M:%S").to_string(),
+        }
+    } else {
+        time_ms.to_string()
+    }
 }
 
 fn is_hsba_a_share(code: &str) -> bool {
@@ -234,5 +300,26 @@ fn extract_stock_list(v: &Value) -> Vec<String> {
             vec![]
         }
         _ => vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_base_url;
+
+    #[test]
+    fn normalize_base_url_adds_http_scheme_when_missing() {
+        assert_eq!(
+            normalize_base_url("103.85.227.158:40003"),
+            "http://103.85.227.158:40003"
+        );
+    }
+
+    #[test]
+    fn normalize_base_url_preserves_existing_scheme() {
+        assert_eq!(
+            normalize_base_url("https://103.85.227.158:40003"),
+            "https://103.85.227.158:40003"
+        );
     }
 }

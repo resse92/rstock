@@ -122,10 +122,9 @@ pub struct MinuteBar1m {
     pub low: Option<f64>,
     pub close: Option<f64>,
     pub volume: Option<f64>,
-    pub amount: Option<f64>,
-    pub adj_factor: Option<f64>,
-    pub settle: Option<f64>,
-    pub open_interest: Option<f64>,
+    pub turn_over: Option<f64>,
+    pub turn_over_rate: Option<f64>,
+    pub factor: f64,
     pub source: Option<String>,
 }
 
@@ -186,10 +185,9 @@ impl MinuteBar1m {
             low: raw.low,
             close: raw.close,
             volume: raw.volume,
-            amount: raw.amount,
-            adj_factor: raw.adj_factor,
-            settle: raw.settle,
-            open_interest: raw.open_interest,
+            turn_over: raw.amount,
+            turn_over_rate: raw.turnover_rate,
+            factor: 1.0,
             source: None,
         })
     }

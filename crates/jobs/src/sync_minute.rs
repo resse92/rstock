@@ -88,16 +88,6 @@ pub async fn run_sync_minute(args: SyncMinuteArgs) -> Result<()> {
     )?;
     let stock_codes = load_sync_stock_codes(&api, args.stock_codes_file.as_ref()).await?;
 
-    let s3_settings = S3Settings {
-        endpoint: s3_host,
-        bucket: args.s3_bucket,
-        access_key: args.s3_access_key,
-        secret_key: args.s3_secret_key,
-        region: args.s3_region,
-    };
-    let s3 = build_s3_client(&s3_settings).await?;
-    ensure_bucket(&s3, &s3_settings.bucket).await?;
-
     let grouped = fetch_minute_grouped_bars(
         &api,
         &stock_codes,
@@ -107,6 +97,16 @@ pub async fn run_sync_minute(args: SyncMinuteArgs) -> Result<()> {
         args.fetch_concurrency,
     )
     .await?;
+
+    let s3_settings = S3Settings {
+            endpoint: s3_host,
+            bucket: args.s3_bucket,
+            access_key: args.s3_access_key,
+            secret_key: args.s3_secret_key,
+            region: args.s3_region,
+        };
+        let s3 = build_s3_client(&s3_settings).await?;
+        ensure_bucket(&s3, &s3_settings.bucket).await?;
 
     let mut uploaded = 0usize;
     let mut rows = 0usize;
@@ -150,8 +150,8 @@ async fn fetch_minute_grouped_bars(
 ) -> Result<BTreeMap<(String, String), Vec<MinuteBar1m>>> {
     let start_compact = compact_date(start_date)?;
     let end_compact = compact_date(end_date)?;
-    let start_api = dashed_date(&start_compact)?;
-    let end_api = dashed_date(&end_compact)?;
+    let start_api = minute_start_time(&start_compact);
+    let end_api = minute_end_time(&end_compact);
     let batches = chunked(stock_codes, chunk_size);
     let mut grouped: BTreeMap<(String, String), Vec<MinuteBar1m>> = BTreeMap::new();
     let mut join_set = JoinSet::new();
@@ -177,7 +177,28 @@ async fn fetch_minute_grouped_bars(
                     Ok(resp) => normalize_full_kline_response(&resp, "1m"),
                     Err(err) => {
                         eprintln!("[QMT][minute] 批次失败，切换 TDX 兜底: {err:#}");
-                        Vec::new()
+                        let mut recovered = Vec::new();
+                        for code in &chunk {
+                            let single_req = MarketRequest::new(
+                                vec![code.clone()],
+                                "1m",
+                                start_api.clone(),
+                                end_api.clone(),
+                                "none",
+                            );
+                            match api_clone.fetch_market_batch(&single_req).await {
+                                Ok(resp) => {
+                                    recovered.extend(normalize_full_kline_response(&resp, "1m"));
+                                }
+                                Err(single_err) => {
+                                    eprintln!(
+                                        "[QMT][minute] 单票 {} 请求失败，留给 TDX 兜底: {single_err:#}",
+                                        code
+                                    );
+                                }
+                            }
+                        }
+                        recovered
                     }
                 };
                 let mut bars = rows
@@ -241,44 +262,44 @@ fn minute_to_parquet_bytes(rows: &[MinuteBar1m]) -> Result<Vec<u8>> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("symbol", DataType::Utf8, false),
         Field::new("exchange", DataType::Utf8, false),
+        Field::new("trade_date", DataType::Utf8, false),
         Field::new("time", DataType::Utf8, false),
         Field::new("open", DataType::Float64, true),
         Field::new("high", DataType::Float64, true),
         Field::new("low", DataType::Float64, true),
         Field::new("close", DataType::Float64, true),
         Field::new("volume", DataType::Float64, true),
-        Field::new("amount", DataType::Float64, true),
+        Field::new("turn_over", DataType::Float64, true),
+        Field::new("turn_over_rate", DataType::Float64, true),
         Field::new("factor", DataType::Float64, true),
-        Field::new("settle", DataType::Float64, true),
-        Field::new("openInterest", DataType::Float64, true),
     ]));
 
     let mut symbol = StringBuilder::new();
     let mut exchange = StringBuilder::new();
+    let mut trade_date = StringBuilder::new();
     let mut time = StringBuilder::new();
     let mut open = Float64Builder::new();
     let mut high = Float64Builder::new();
     let mut low = Float64Builder::new();
     let mut close = Float64Builder::new();
     let mut volume = Float64Builder::new();
-    let mut amount = Float64Builder::new();
+    let mut turn_over = Float64Builder::new();
+    let mut turn_over_rate = Float64Builder::new();
     let mut factor = Float64Builder::new();
-    let mut settle = Float64Builder::new();
-    let mut open_interest = Float64Builder::new();
 
     for row in rows {
         symbol.append_value(&row.symbol);
         exchange.append_value(&row.exchange);
+        trade_date.append_value(minute_trade_date(&row.time));
         time.append_value(&row.time);
         open.append_option(row.open);
         high.append_option(row.high);
         low.append_option(row.low);
         close.append_option(row.close);
         volume.append_option(row.volume);
-        amount.append_option(row.amount);
-        factor.append_option(row.adj_factor);
-        settle.append_option(row.settle);
-        open_interest.append_option(row.open_interest);
+        turn_over.append_option(row.turn_over);
+        turn_over_rate.append_option(row.turn_over_rate);
+        factor.append_value(row.factor);
     }
 
     let batch = RecordBatch::try_new(
@@ -286,16 +307,16 @@ fn minute_to_parquet_bytes(rows: &[MinuteBar1m]) -> Result<Vec<u8>> {
         vec![
             Arc::new(symbol.finish()) as ArrayRef,
             Arc::new(exchange.finish()) as ArrayRef,
+            Arc::new(trade_date.finish()) as ArrayRef,
             Arc::new(time.finish()) as ArrayRef,
             Arc::new(open.finish()) as ArrayRef,
             Arc::new(high.finish()) as ArrayRef,
             Arc::new(low.finish()) as ArrayRef,
             Arc::new(close.finish()) as ArrayRef,
             Arc::new(volume.finish()) as ArrayRef,
-            Arc::new(amount.finish()) as ArrayRef,
+            Arc::new(turn_over.finish()) as ArrayRef,
+            Arc::new(turn_over_rate.finish()) as ArrayRef,
             Arc::new(factor.finish()) as ArrayRef,
-            Arc::new(settle.finish()) as ArrayRef,
-            Arc::new(open_interest.finish()) as ArrayRef,
         ],
     )?;
 
@@ -308,6 +329,10 @@ fn minute_to_parquet_bytes(rows: &[MinuteBar1m]) -> Result<Vec<u8>> {
     writer.write(&batch)?;
     writer.close()?;
     Ok(cursor.into_inner())
+}
+
+fn minute_trade_date(time: &str) -> &str {
+    time.get(0..10).unwrap_or(time)
 }
 
 fn compact_date(input: &str) -> Result<String> {
@@ -326,55 +351,58 @@ fn compact_date(input: &str) -> Result<String> {
     ))
 }
 
-fn dashed_date(input: &str) -> Result<String> {
-    let compact = compact_date(input)?;
-    Ok(format!(
-        "{}-{}-{}",
-        &compact[0..4],
-        &compact[4..6],
-        &compact[6..8]
-    ))
+fn minute_start_time(compact_date: &str) -> String {
+    format!("{compact_date}091500")
+}
+
+fn minute_end_time(compact_date: &str) -> String {
+    format!("{compact_date}150000")
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        fetch_minute_grouped_bars, minute_partition_key, write_minute_partition_file_local,
+        fetch_minute_grouped_bars, minute_partition_key, minute_trade_date,
+        write_minute_partition_file_local,
     };
     use crate::api::ApiClient;
-    use crate::models::{MinuteBar1m, DEFAULT_QMT_API_HOST, DEFAULT_TIMEOUT_SECS};
+    use crate::models::MinuteBar1m;
     use anyhow::Result;
     use parquet::file::reader::{FileReader, SerializedFileReader};
     use parquet::record::RowAccessor;
+    use serde::Deserialize;
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn writes_expected_minute_partition_file_to_local_staging() -> Result<()> {
+    fn writes_all_minute_rows_for_single_trade_date_to_local_staging() -> Result<()> {
         let staging_dir = temp_dir("sync-minute");
         let bars = vec![
             minute_bar("000001.SZ", "SZ", "2026-05-24 09:31:00", 10.0),
             minute_bar("000001.SZ", "SZ", "2026-05-24 09:32:00", 10.2),
-            minute_bar("600000.SH", "SH", "2026-05-24 09:31:00", 8.8),
+            minute_bar("000333.SZ", "SZ", "2026-05-24 14:59:00", 58.8),
         ];
 
-        let local_path =
-            write_minute_partition_file_local(&staging_dir, "2026-05-24", "SZ", &bars[..2])?;
+        let local_path = write_minute_partition_file_local(&staging_dir, "2026-05-24", "SZ", &bars)?;
 
         let expected = staging_dir.join(minute_partition_key("2026-05-24", "SZ"));
         assert_eq!(local_path, expected);
         assert!(local_path.exists());
 
         let rows = read_rows(&local_path)?;
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].0, "000001.SZ");
         assert_eq!(rows[0].1, "SZ");
-        assert_eq!(rows[0].2, "2026-05-24 09:31:00");
-        assert_eq!(rows[1].2, "2026-05-24 09:32:00");
-        assert_eq!(rows[0].3, Some(10.0));
-        assert_eq!(rows[1].3, Some(10.2));
+        assert_eq!(rows[0].2, "2026-05-24");
+        assert_eq!(rows[0].3, "2026-05-24 09:31:00");
+        assert_eq!(rows[1].3, "2026-05-24 09:32:00");
+        assert_eq!(rows[2].0, "000333.SZ");
+        assert_eq!(rows[2].2, "2026-05-24");
+        assert_eq!(rows[2].3, "2026-05-24 14:59:00");
+        assert_eq!(rows[0].4, Some(10.0));
+        assert_eq!(rows[1].4, Some(10.2));
 
         fs::remove_dir_all(staging_dir)?;
         Ok(())
@@ -390,10 +418,9 @@ mod tests {
             low: Some(open - 0.5),
             close: Some(open + 0.1),
             volume: Some(1000.0),
-            amount: Some(10000.0),
-            adj_factor: Some(1.0),
-            settle: None,
-            open_interest: None,
+            turn_over: Some(10000.0),
+            turn_over_rate: Some(0.12),
+            factor: 1.0,
             source: Some("test".to_string()),
         }
     }
@@ -401,13 +428,14 @@ mod tests {
     #[tokio::test]
     #[ignore = "hits real QMT/TDX and stages parquet locally"]
     async fn real_minute_sync_stages_remote_rows_without_upload() -> Result<()> {
+        let config = load_test_qmt_config()?;
         let api = ApiClient::new(
-            std::env::var("QMT_API_HOST").unwrap_or_else(|_| DEFAULT_QMT_API_HOST.to_string()),
-            std::env::var("QMT_API_AUTHORIZATION").ok(),
-            std::time::Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            config.host,
+            config.authorization,
+            std::time::Duration::from_secs(config.timeout),
         )?;
         let codes = real_minute_codes();
-        let start_date = "2025-01-02".to_string();
+        let start_date = "2026-05-28".to_string();
         let end_date = start_date.clone();
 
         let mut grouped =
@@ -415,11 +443,13 @@ mod tests {
         assert!(!grouped.is_empty(), "no remote minute rows fetched");
 
         let staging_dir = temp_dir("real-sync-minute");
+        println!("staging_dir={}", staging_dir.display());
         let mut expected_by_key = BTreeMap::new();
         for ((trade_date, exchange), bars) in &mut grouped {
             bars.sort_by(|a, b| a.symbol.cmp(&b.symbol).then(a.time.cmp(&b.time)));
             let key = minute_partition_key(trade_date, exchange);
             let path = write_minute_partition_file_local(&staging_dir, trade_date, exchange, bars)?;
+            println!("wrote {} rows={} path={}", key, bars.len(), path.display());
             expected_by_key.insert(key.clone(), rows_from_minute_bars(bars));
             let actual = read_full_rows(&path)?;
             assert_eq!(
@@ -428,11 +458,10 @@ mod tests {
             );
         }
 
-        fs::remove_dir_all(staging_dir)?;
         Ok(())
     }
 
-    fn read_rows(path: &Path) -> Result<Vec<(String, String, String, Option<f64>)>> {
+    fn read_rows(path: &Path) -> Result<Vec<(String, String, String, String, Option<f64>)>> {
         let file = fs::File::open(path)?;
         let reader = SerializedFileReader::new(file)?;
         let iter = reader.get_row_iter(None)?;
@@ -443,7 +472,8 @@ mod tests {
                 record.get_string(0)?.to_string(),
                 record.get_string(1)?.to_string(),
                 record.get_string(2)?.to_string(),
-                record.get_double(3).ok(),
+                record.get_string(3)?.to_string(),
+                record.get_double(4).ok(),
             ));
         }
         Ok(out)
@@ -460,12 +490,15 @@ mod tests {
                 record.get_string(0)?.to_string(),
                 record.get_string(1)?.to_string(),
                 record.get_string(2)?.to_string(),
-                record.get_double(3).ok(),
+                record.get_string(3)?.to_string(),
                 record.get_double(4).ok(),
                 record.get_double(5).ok(),
                 record.get_double(6).ok(),
                 record.get_double(7).ok(),
                 record.get_double(8).ok(),
+                record.get_double(9).ok(),
+                record.get_double(10).ok(),
+                record.get_double(11).ok(),
             ));
         }
         Ok(out)
@@ -475,6 +508,9 @@ mod tests {
         String,
         String,
         String,
+        String,
+        Option<f64>,
+        Option<f64>,
         Option<f64>,
         Option<f64>,
         Option<f64>,
@@ -489,20 +525,47 @@ mod tests {
                 (
                     bar.symbol.clone(),
                     bar.exchange.clone(),
+                    minute_trade_date(&bar.time).to_string(),
                     bar.time.clone(),
                     bar.open,
                     bar.high,
                     bar.low,
                     bar.close,
                     bar.volume,
-                    bar.amount,
+                    bar.turn_over,
+                    bar.turn_over_rate,
+                    Some(bar.factor),
                 )
             })
             .collect()
     }
 
     fn real_minute_codes() -> Vec<String> {
-        vec!["000001.SZ".to_string(), "600519.SH".to_string()]
+        vec!["000001.SZ".to_string()]
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct TestRootConfig {
+        qmt: TestQmtConfig,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct TestQmtConfig {
+        host: String,
+        authorization: Option<String>,
+        #[serde(default = "default_test_qmt_timeout")]
+        timeout: u64,
+    }
+
+    fn load_test_qmt_config() -> Result<TestQmtConfig> {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config.toml");
+        let raw = fs::read_to_string(path)?;
+        let config: TestRootConfig = toml::from_str(&raw)?;
+        Ok(config.qmt)
+    }
+
+    fn default_test_qmt_timeout() -> u64 {
+        30
     }
 
     fn temp_dir(prefix: &str) -> PathBuf {
@@ -511,6 +574,7 @@ mod tests {
             .expect("system time before unix epoch")
             .as_nanos();
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
             .join("temp")
             .join(format!("{prefix}-{}-{nanos}", std::process::id()));
         fs::create_dir_all(&dir).expect("create temp dir");

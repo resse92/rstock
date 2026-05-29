@@ -149,10 +149,9 @@ mod enabled {
             low: Some(bar.low),
             close: Some(bar.close),
             volume: Some(bar.vol),
-            amount: Some(bar.amount),
-            adj_factor: None,
-            settle: None,
-            open_interest: None,
+            turn_over: Some(bar.amount),
+            turn_over_rate: None,
+            factor: 1.0,
             source: Some("tdx".to_string()),
         })
     }

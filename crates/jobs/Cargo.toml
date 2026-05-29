@@ -12,13 +12,15 @@ clap = { version = "4", features = ["derive", "env"] }
 csv = "1"
 home = "=0.5.9"
 parquet = { version = "56", features = ["arrow"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+qmt = { path = "../../vendor/qmt" }
 storage = { package = "rstock-storage", path = "../storage" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tdxrs = { path = "../../vendor/tdxrs", optional = true }
 time = "=0.3.36"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tonic = { version = "0.12", features = ["transport"] }
+toml = "0.8"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [features]

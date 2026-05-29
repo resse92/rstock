@@ -6,14 +6,7 @@
 
 `cargo run -p rstock`
 
-服务配置通过环境变量提供，不通过启动参数堆配置。常用环境变量：
-
-- `HTTP_BIND`，默认 `0.0.0.0:8080`
-- `DAILY_CRON`，默认 `0 30 15 * * *`
-- `MINUTE_CRON`，默认 `0 10 15 * * *`
-- `LOCAL_STAGING_DIR`，默认 `data/staging`
-- `QMT_API_HOST`，默认 `http://103.85.227.158:40002`，也可填该服务的 `/openapi.json` 地址；`QMT_API_AUTHORIZATION`
-- `S3_HOST`、`S3_BUCKET`、`S3_ACCESS_KEY`、`S3_SECRET_KEY`
+服务配置统一读取项目根目录的 `config.toml`。可先参考 `config.example.toml` 创建本地配置。
 
 接口：
 
@@ -23,19 +16,7 @@
 
 ## Tool 入口
 
-以下入口只用于运维、调试或一次性任务；默认运行路径仍然是后端服务。
-
-### 日 K 同步 Tool
-
-`cargo run -p rstock -- sync-daily --start-date 2020-01-01 --end-date 2020-03-27 --chunk-size 20 --fetch-concurrency 1`
-
-日 K 会先写入 `LOCAL_STAGING_DIR` 下的本地 Parquet，校验可读后再上传到 S3。
-
-### 1 分钟线同步 Tool
-
-`cargo run -p rstock -- sync-minute --start-date 2026-05-24 --end-date 2026-05-24 --chunk-size 100 --fetch-concurrency 4`
-
-分钟线同样先落本地 staging，确认 Parquet 可读后再上传到 `curated/minute_bars_1m/`。
+以下入口只用于离线转换或一次性导入；在线同步由 server 的 API 和 cron 任务负责，不再提供独立 CLI。
 
 ### ZIP/CSV 转本地 Parquet Tool
 
@@ -52,3 +33,9 @@
 分钟线 ZIP：
 
 `cargo run -p zip-csv-to-parquet -- minute --input-dir /path/to/minute_zips --output-dir /path/to/parquet`
+
+分钟线 ZIP/CSV 直传 S3：
+
+`cargo run -p zip-csv-to-parquet -- minute-s3 --input-dir /path/to/minute_zips`
+
+该命令会把 ZIP/CSV 解析为分区 Parquet，先落本地 `config.toml` 里的 `s3.local_staging_dir`，校验后上传到远端 `s3.bucket/curated/minute_bars_1m/`。

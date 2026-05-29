@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::env;
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,12 +17,12 @@ use tokio::task::JoinSet;
 use crate::api::ApiClient;
 use crate::models::{MarketRequest, MinuteBar1m, DEFAULT_QMT_API_HOST, DEFAULT_TIMEOUT_SECS};
 use crate::normalize::normalize_full_kline_response;
-use crate::s3::{
+use crate::tdx_source;
+use crate::utils::{chunked, load_stock_codes_from_file};
+use storage::s3::{
     build_s3_client, ensure_bucket, upload_local_file, validate_parquet_file,
     write_parquet_bytes_local, S3Settings,
 };
-use crate::tdx_source;
-use crate::utils::{chunked, load_stock_codes_from_file};
 
 #[derive(Debug, Args, Clone)]
 pub struct SyncMinuteArgs {
@@ -42,31 +41,31 @@ pub struct SyncMinuteArgs {
     #[arg(long)]
     pub stock_codes_file: Option<PathBuf>,
 
-    #[arg(long, env = "QMT_API_HOST", default_value = DEFAULT_QMT_API_HOST)]
+    #[arg(long, default_value = DEFAULT_QMT_API_HOST)]
     pub base_url: String,
 
-    #[arg(long, env = "QMT_API_AUTHORIZATION")]
+    #[arg(long)]
     pub authorization: Option<String>,
 
-    #[arg(long, env = "QMT_API_TIMEOUT", default_value_t = DEFAULT_TIMEOUT_SECS)]
+    #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
     pub timeout: u64,
 
-    #[arg(long, env = "S3_BUCKET", default_value = "stock")]
+    #[arg(long, default_value = "stock")]
     pub s3_bucket: String,
 
-    #[arg(long, env = "LOCAL_STAGING_DIR", default_value = "data/staging")]
+    #[arg(long, default_value = "data/staging")]
     pub staging_dir: PathBuf,
 
-    #[arg(long, env = "S3_REGION", default_value = "us-east-1")]
+    #[arg(long, default_value = "us-east-1")]
     pub s3_region: String,
 
-    #[arg(long, env = "S3_ACCESS_KEY")]
+    #[arg(long)]
     pub s3_access_key: Option<String>,
 
-    #[arg(long, env = "S3_SECRET_KEY")]
+    #[arg(long)]
     pub s3_secret_key: Option<String>,
 
-    #[arg(long, help = "S3 endpoint，默认读取 S3_HOST 或 s3_host")]
+    #[arg(long, help = "S3 endpoint")]
     pub s3_host: Option<String>,
 }
 
@@ -80,10 +79,7 @@ pub async fn run_sync_minute(args: SyncMinuteArgs) -> Result<()> {
 
     let start_date = compact_date(&args.start_date)?;
     let end_date = compact_date(&args.end_date)?;
-    let s3_host = args
-        .s3_host
-        .or_else(|| env_var_any(&["S3_HOST", "s3_host"]))
-        .ok_or_else(|| anyhow!("缺少 S3 host，请在 .env 设置 s3_host 或 S3_HOST"))?;
+    let s3_host = args.s3_host.ok_or_else(|| anyhow!("缺少 S3 host，请在配置中提供"))?;
 
     let api = ApiClient::new(
         args.base_url,
@@ -340,17 +336,6 @@ fn dashed_date(input: &str) -> Result<String> {
     ))
 }
 
-fn env_var_any(keys: &[&str]) -> Option<String> {
-    for key in keys {
-        if let Ok(v) = env::var(key) {
-            if !v.trim().is_empty() {
-                return Some(v);
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -416,7 +401,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "hits real QMT/TDX and stages parquet locally"]
     async fn real_minute_sync_stages_remote_rows_without_upload() -> Result<()> {
-        dotenvy::dotenv().ok();
         let api = ApiClient::new(
             std::env::var("QMT_API_HOST").unwrap_or_else(|_| DEFAULT_QMT_API_HOST.to_string()),
             std::env::var("QMT_API_AUTHORIZATION").ok(),

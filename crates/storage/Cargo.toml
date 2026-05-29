@@ -1,0 +1,10 @@
+[package]
+name = "rstock-storage"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+bytes = "1"
+minio = "0.3.0"
+parquet = { version = "56", features = ["arrow"] }

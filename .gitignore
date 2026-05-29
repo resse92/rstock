@@ -9,6 +9,8 @@
 .env
 .env.*
 !.env.example
+config.toml
+!config.example.toml
 
 # Local data files
 /data/

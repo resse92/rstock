@@ -1,11 +1,12 @@
 mod common;
+mod config;
 mod daily;
 mod index_daily;
 mod minute;
+mod minute_s3;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use dotenvy::dotenv;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -26,14 +27,17 @@ enum Commands {
     IndexDaily(index_daily::Args),
     /// 分钟线 ZIP/CSV 转本地 Parquet
     Minute(minute::Args),
+    /// 分钟线 ZIP/CSV 转远端 S3 Parquet
+    MinuteS3(minute_s3::Args),
 }
 
-fn main() -> Result<()> {
-    dotenv().ok();
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Daily(args) => daily::run(args),
         Commands::IndexDaily(args) => index_daily::run(args),
         Commands::Minute(args) => minute::run(args),
+        Commands::MinuteS3(args) => minute_s3::run(args).await,
     }
 }

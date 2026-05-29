@@ -1,5 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::env;
+use std::collections::BTreeMap;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -8,52 +7,38 @@ use anyhow::{anyhow, Context, Result};
 use arrow_array::builder::{Float64Builder, StringBuilder};
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
-use clap::Args;
+use clap::Args as ClapArgs;
 use csv::StringRecord;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
+use storage::s3::{build_s3_client, ensure_bucket, S3Client, S3Settings};
+use storage::s3::{upload_local_file, validate_parquet_file, write_parquet_bytes_local};
 use tokio::task::JoinSet;
 use zip::ZipArchive;
 
-use crate::s3::{build_s3_client, ensure_bucket, S3Client, S3Settings};
-use crate::s3::{upload_local_file, validate_parquet_file, write_parquet_bytes_local};
+use crate::config::load_minute_s3_config;
+use crate::common::{append_manifest_line, load_manifest, parse_opt_f64, source_key};
 
-#[derive(Debug, Args)]
-pub struct ImportMinuteArgs {
+#[derive(Debug, ClapArgs)]
+pub struct Args {
+    #[arg(long, default_value = "config.toml", help = "配置文件路径")]
+    pub config_file: PathBuf,
+
     #[arg(long, help = "分钟 zip/csv 根目录")]
     pub input_dir: PathBuf,
 
-    #[arg(long, default_value_t = 200_000, help = "每个 parquet part 最大行数")]
-    pub part_size: usize,
+    #[arg(long, help = "每个 parquet part 最大行数，默认读取 config.toml")]
+    pub part_size: Option<usize>,
 
-    #[arg(long, default_value_t = 4, help = "并发上传 parquet part 数")]
-    pub upload_concurrency: usize,
+    #[arg(long, help = "并发上传 parquet part 数，默认读取 config.toml")]
+    pub upload_concurrency: Option<usize>,
 
     #[arg(
         long,
-        default_value = "meta/ingestion/minute_zip_manifest.txt",
-        help = "已完成 zip/csv 清单文件"
+        help = "已完成 zip/csv 清单文件，默认读取 config.toml"
     )]
-    pub manifest_file: PathBuf,
-
-    #[arg(long, env = "S3_BUCKET", default_value = "stock")]
-    pub s3_bucket: String,
-
-    #[arg(long, env = "LOCAL_STAGING_DIR", default_value = "data/staging")]
-    pub staging_dir: PathBuf,
-
-    #[arg(long, env = "S3_REGION", default_value = "us-east-1")]
-    pub s3_region: String,
-
-    #[arg(long, env = "S3_ACCESS_KEY")]
-    pub s3_access_key: Option<String>,
-
-    #[arg(long, env = "S3_SECRET_KEY")]
-    pub s3_secret_key: Option<String>,
-
-    #[arg(long, help = "S3 endpoint，默认读取 S3_HOST 或 s3_host")]
-    pub s3_host: Option<String>,
+    pub manifest_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,24 +58,29 @@ struct MinuteRow {
     is_paused: Option<f64>,
 }
 
-pub async fn run_import_minute(args: ImportMinuteArgs) -> Result<()> {
-    if args.part_size == 0 {
+pub async fn run(args: Args) -> Result<()> {
+    let file_config = load_minute_s3_config(&args.config_file)?;
+    let part_size = args.part_size.unwrap_or(file_config.part_size);
+    let upload_concurrency = args
+        .upload_concurrency
+        .unwrap_or(file_config.upload_concurrency);
+    let manifest_file = args
+        .manifest_file
+        .unwrap_or_else(|| file_config.manifest_file.clone());
+
+    if part_size == 0 {
         return Err(anyhow!("--part-size 必须大于 0"));
     }
-    if args.upload_concurrency == 0 {
+    if upload_concurrency == 0 {
         return Err(anyhow!("--upload-concurrency 必须大于 0"));
     }
 
-    let s3_host = args
-        .s3_host
-        .or_else(|| env_var_any(&["S3_HOST", "s3_host"]))
-        .ok_or_else(|| anyhow!("缺少 S3 host，请在 .env 设置 s3_host 或 S3_HOST"))?;
     let s3_settings = S3Settings {
-        endpoint: s3_host,
-        bucket: args.s3_bucket,
-        access_key: args.s3_access_key,
-        secret_key: args.s3_secret_key,
-        region: args.s3_region,
+        endpoint: file_config.host,
+        bucket: file_config.bucket,
+        access_key: file_config.access_key,
+        secret_key: file_config.secret_key,
+        region: file_config.region,
     };
 
     let s3 = build_s3_client(&s3_settings).await?;
@@ -106,7 +96,7 @@ pub async fn run_import_minute(args: ImportMinuteArgs) -> Result<()> {
         ));
     }
 
-    let mut imported = load_manifest(&args.manifest_file)?;
+    let mut imported = load_manifest(&manifest_file)?;
     let mut next_part_by_partition: BTreeMap<(String, String), usize> = BTreeMap::new();
     let mut scanned_rows = 0usize;
     let mut written_rows = 0usize;
@@ -128,24 +118,22 @@ pub async fn run_import_minute(args: ImportMinuteArgs) -> Result<()> {
 
         let (source_rows, source_written_rows, source_parts) = process_source(
             path,
-            args.part_size,
-            args.upload_concurrency,
+            part_size,
+            upload_concurrency,
             &s3,
             &s3_settings.bucket,
-            &args.staging_dir,
+            &file_config.staging_dir,
             &mut next_part_by_partition,
         )
         .await
         .with_context(|| format!("解析/上传文件失败: {}", path.display()))?;
         scanned_rows += source_rows;
-
-        append_manifest_line(&args.manifest_file, &manifest_key)?;
-        imported.insert(manifest_key);
         written_rows += source_written_rows;
         part_files += source_parts;
-
+        append_manifest_line(&manifest_file, &manifest_key)?;
+        imported.insert(manifest_key);
         println!(
-            "[FILE] {}/{} 上传完成: {}, 解析 {} 条, 写入 {} 条, {} 个 part",
+            "[ZIP] {}/{} 导入完成: {}, 解析 {} 条, 写入 {} 条, {} 个 part",
             idx + 1,
             files.len(),
             path.display(),
@@ -156,13 +144,13 @@ pub async fn run_import_minute(args: ImportMinuteArgs) -> Result<()> {
     }
 
     println!(
-        "[DONE] 导入完成: 扫描 {} 条, 写入 {} 条, {} 个 part 文件, 跳过 {} 个已完成文件, bucket={}",
-        scanned_rows, written_rows, part_files, skipped, s3_settings.bucket
+        "[DONE] minute_s3 完成: 扫描 {} 条, 写入 {} 条, {} 个 part, 跳过 {} 个文件",
+        scanned_rows, written_rows, part_files, skipped
     );
     Ok(())
 }
 
-fn collect_input_files_recursive(root: &Path) -> Result<Vec<PathBuf>> {
+fn collect_input_files_recursive(input_dir: &Path) -> Result<Vec<PathBuf>> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         for entry in
             std::fs::read_dir(dir).with_context(|| format!("读取目录失败: {}", dir.display()))?
@@ -189,7 +177,7 @@ fn collect_input_files_recursive(root: &Path) -> Result<Vec<PathBuf>> {
     }
 
     let mut files = Vec::new();
-    walk(root, &mut files)?;
+    walk(input_dir, &mut files)?;
     files.sort();
     Ok(files)
 }
@@ -203,14 +191,13 @@ async fn process_source(
     staging_dir: &Path,
     next_part_by_partition: &mut BTreeMap<(String, String), usize>,
 ) -> Result<(usize, usize, usize)> {
-    let mut buffers: BTreeMap<(String, String), Vec<MinuteRow>> = BTreeMap::new();
-    let mut uploads = JoinSet::new();
-    let mut scanned_rows = 0usize;
-    let mut written_rows = 0usize;
-    let mut part_files = 0usize;
-
-    match path.extension().and_then(|s| s.to_str()) {
-        Some(ext) if ext.eq_ignore_ascii_case("zip") => {
+    match path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("zip") => {
             process_zip(
                 path,
                 part_size,
@@ -219,50 +206,26 @@ async fn process_source(
                 bucket,
                 staging_dir,
                 next_part_by_partition,
-                &mut buffers,
-                &mut uploads,
-                &mut scanned_rows,
-                &mut written_rows,
-                &mut part_files,
             )
-            .await?;
+            .await
         }
-        Some(ext) if ext.eq_ignore_ascii_case("csv") => {
+        Some("csv") => {
             let file = std::fs::File::open(path)?;
             process_csv_reader(
                 file,
+                path,
                 part_size,
                 upload_concurrency,
                 s3,
                 bucket,
                 staging_dir,
                 next_part_by_partition,
-                &mut buffers,
-                &mut uploads,
-                &mut scanned_rows,
-                &mut written_rows,
-                &mut part_files,
             )
-            .await?;
+            .await
         }
-        _ => return Err(anyhow!("不支持的文件类型: {}", path.display())),
+        Some(other) => Err(anyhow!("不支持的文件类型: {other}")),
+        None => Err(anyhow!("无法识别文件类型: {}", path.display())),
     }
-
-    flush_all_buffers(
-        s3,
-        bucket,
-        staging_dir,
-        upload_concurrency,
-        next_part_by_partition,
-        &mut buffers,
-        &mut uploads,
-        &mut written_rows,
-        &mut part_files,
-    )
-    .await?;
-    drain_uploads(&mut uploads, &mut written_rows, &mut part_files).await?;
-
-    Ok((scanned_rows, written_rows, part_files))
 }
 
 async fn process_zip(
@@ -273,14 +236,12 @@ async fn process_zip(
     bucket: &str,
     staging_dir: &Path,
     next_part_by_partition: &mut BTreeMap<(String, String), usize>,
-    buffers: &mut BTreeMap<(String, String), Vec<MinuteRow>>,
-    uploads: &mut JoinSet<Result<(String, usize)>>,
-    scanned_rows: &mut usize,
-    written_rows: &mut usize,
-    part_files: &mut usize,
-) -> Result<()> {
+) -> Result<(usize, usize, usize)> {
     let file = std::fs::File::open(path)?;
     let mut archive = ZipArchive::new(file)?;
+    let mut total_rows = 0usize;
+    let mut total_written = 0usize;
+    let mut total_parts = 0usize;
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
@@ -293,71 +254,83 @@ async fn process_zip(
         {
             continue;
         }
-
-        let mut reader = csv::ReaderBuilder::new()
-            .has_headers(true)
-            .from_reader(&mut entry);
-        for record in reader.records() {
-            if let Some(row) = parse_minute_row(&record?) {
-                push_row(
-                    row,
-                    part_size,
-                    upload_concurrency,
-                    s3,
-                    bucket,
-                    staging_dir,
-                    next_part_by_partition,
-                    buffers,
-                    uploads,
-                    written_rows,
-                    part_files,
-                )
-                .await?;
-                *scanned_rows += 1;
-            }
-        }
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes)?;
+        let cursor = Cursor::new(bytes);
+        let (rows, written, parts) = process_csv_reader(
+            cursor,
+            path,
+            part_size,
+            upload_concurrency,
+            s3,
+            bucket,
+            staging_dir,
+            next_part_by_partition,
+        )
+        .await?;
+        total_rows += rows;
+        total_written += written;
+        total_parts += parts;
     }
 
-    Ok(())
+    Ok((total_rows, total_written, total_parts))
 }
 
 async fn process_csv_reader<R: Read>(
     reader: R,
+    source_path: &Path,
     part_size: usize,
     upload_concurrency: usize,
     s3: &S3Client,
     bucket: &str,
     staging_dir: &Path,
     next_part_by_partition: &mut BTreeMap<(String, String), usize>,
-    buffers: &mut BTreeMap<(String, String), Vec<MinuteRow>>,
-    uploads: &mut JoinSet<Result<(String, usize)>>,
-    scanned_rows: &mut usize,
-    written_rows: &mut usize,
-    part_files: &mut usize,
-) -> Result<()> {
-    let mut reader = csv::ReaderBuilder::new()
+) -> Result<(usize, usize, usize)> {
+    let mut csv = csv::ReaderBuilder::new()
         .has_headers(true)
         .from_reader(reader);
-    for record in reader.records() {
-        if let Some(row) = parse_minute_row(&record?) {
-            push_row(
-                row,
-                part_size,
-                upload_concurrency,
-                s3,
-                bucket,
-                staging_dir,
-                next_part_by_partition,
-                buffers,
-                uploads,
-                written_rows,
-                part_files,
-            )
-            .await?;
-            *scanned_rows += 1;
-        }
+    let mut buffers: BTreeMap<(String, String), Vec<MinuteRow>> = BTreeMap::new();
+    let mut uploads = JoinSet::new();
+    let mut scanned = 0usize;
+    let mut written = 0usize;
+    let mut parts = 0usize;
+
+    for record in csv.records() {
+        let row = match parse_minute_row(&record?) {
+            Some(row) => row,
+            None => continue,
+        };
+        scanned += 1;
+        push_row(
+            row,
+            part_size,
+            upload_concurrency,
+            s3,
+            bucket,
+            staging_dir,
+            next_part_by_partition,
+            &mut buffers,
+            &mut uploads,
+            &mut written,
+            &mut parts,
+        )
+        .await
+        .with_context(|| format!("处理记录失败: {}", source_path.display()))?;
     }
-    Ok(())
+
+    flush_all_buffers(
+        s3,
+        bucket,
+        staging_dir,
+        next_part_by_partition,
+        &mut buffers,
+        &mut uploads,
+        &mut written,
+        &mut parts,
+    )
+    .await?;
+    drain_uploads(&mut uploads).await?;
+    Ok((scanned, written, parts))
 }
 
 async fn push_row(
@@ -369,56 +342,60 @@ async fn push_row(
     staging_dir: &Path,
     next_part_by_partition: &mut BTreeMap<(String, String), usize>,
     buffers: &mut BTreeMap<(String, String), Vec<MinuteRow>>,
-    uploads: &mut JoinSet<Result<(String, usize)>>,
-    written_rows: &mut usize,
-    part_files: &mut usize,
+    uploads: &mut JoinSet<Result<()>>,
+    written: &mut usize,
+    parts: &mut usize,
 ) -> Result<()> {
     let key = (row.trade_date.clone(), row.exchange.clone());
-    let buffer = buffers.entry(key.clone()).or_default();
-    buffer.push(row);
-    if buffer.len() >= part_size {
-        let rows = std::mem::take(buffer);
-        flush_rows(
-            s3,
-            bucket,
-            staging_dir,
-            upload_concurrency,
-            next_part_by_partition,
-            key,
-            rows,
-            uploads,
-            written_rows,
-            part_files,
-        )
-        .await?;
+    let buf = buffers.entry(key.clone()).or_default();
+    buf.push(row);
+    if buf.len() < part_size {
+        return Ok(());
     }
-    Ok(())
+    let rows = std::mem::take(buf);
+    flush_rows(
+        key,
+        rows,
+        s3,
+        bucket,
+        staging_dir,
+        next_part_by_partition,
+        uploads,
+        written,
+        parts,
+    )
+    .await?;
+    wait_one_upload(upload_concurrency, uploads).await
 }
 
 async fn flush_all_buffers(
     s3: &S3Client,
     bucket: &str,
     staging_dir: &Path,
-    upload_concurrency: usize,
     next_part_by_partition: &mut BTreeMap<(String, String), usize>,
     buffers: &mut BTreeMap<(String, String), Vec<MinuteRow>>,
-    uploads: &mut JoinSet<Result<(String, usize)>>,
-    written_rows: &mut usize,
-    part_files: &mut usize,
+    uploads: &mut JoinSet<Result<()>>,
+    written: &mut usize,
+    parts: &mut usize,
 ) -> Result<()> {
-    let pending = std::mem::take(buffers);
-    for (key, rows) in pending {
+    let keys: Vec<(String, String)> = buffers.keys().cloned().collect();
+    for key in keys {
+        let Some(rows) = buffers.remove(&key) else {
+            continue;
+        };
+        if rows.is_empty() {
+            continue;
+        }
         flush_rows(
+            key,
+            rows,
             s3,
             bucket,
             staging_dir,
-            upload_concurrency,
             next_part_by_partition,
-            key,
-            rows,
             uploads,
-            written_rows,
-            part_files,
+            written,
+            parts,
         )
         .await?;
     }
@@ -426,72 +403,58 @@ async fn flush_all_buffers(
 }
 
 async fn flush_rows(
+    key: (String, String),
+    rows: Vec<MinuteRow>,
     s3: &S3Client,
     bucket: &str,
     staging_dir: &Path,
-    upload_concurrency: usize,
     next_part_by_partition: &mut BTreeMap<(String, String), usize>,
-    key: (String, String),
-    rows: Vec<MinuteRow>,
-    uploads: &mut JoinSet<Result<(String, usize)>>,
-    written_rows: &mut usize,
-    part_files: &mut usize,
+    uploads: &mut JoinSet<Result<()>>,
+    written: &mut usize,
+    parts: &mut usize,
 ) -> Result<()> {
-    if rows.is_empty() {
-        return Ok(());
-    }
     let (trade_date, exchange) = key;
     let mut deduped = dedup_rows(rows);
     deduped.sort_by(|a, b| a.symbol.cmp(&b.symbol).then(a.time.cmp(&b.time)));
-    let next_part = next_part_by_partition
+    if deduped.is_empty() {
+        return Ok(());
+    }
+    let part_no = next_part_by_partition
         .entry((trade_date.clone(), exchange.clone()))
         .or_default();
-    let part_idx = *next_part;
-    *next_part += 1;
-
-    while uploads.len() >= upload_concurrency {
-        wait_one_upload(uploads, written_rows, part_files).await?;
-    }
-
-    let s3 = s3.clone();
+    let key = format!(
+        "curated/minute_bars_1m/trade_date={trade_date}/exchange={exchange}/part-{part_no:06}.parquet"
+    );
+    *part_no += 1;
+    let local_path = staging_dir.join(&key);
+    let parquet_bytes = to_parquet_bytes(&deduped)?;
+    write_parquet_bytes_local(&local_path, parquet_bytes)?;
+    validate_parquet_file(&local_path)?;
+    *written += deduped.len();
+    *parts += 1;
     let bucket = bucket.to_string();
-    let staging_dir = staging_dir.to_path_buf();
+    let key_clone = key.clone();
+    let local_path_clone = local_path.clone();
+    let s3_owned = s3.clone();
     uploads.spawn(async move {
-        upload_minute_part_owned(
-            s3,
-            bucket,
-            staging_dir,
-            trade_date,
-            exchange,
-            part_idx,
-            deduped,
-        )
-        .await
+        upload_minute_part_owned(s3_owned, bucket, key_clone, local_path_clone).await
     });
     Ok(())
 }
 
-async fn wait_one_upload(
-    uploads: &mut JoinSet<Result<(String, usize)>>,
-    written_rows: &mut usize,
-    part_files: &mut usize,
-) -> Result<()> {
+async fn wait_one_upload(limit: usize, uploads: &mut JoinSet<Result<()>>) -> Result<()> {
+    if uploads.len() < limit {
+        return Ok(());
+    }
     if let Some(result) = uploads.join_next().await {
-        let (key, rows) = result??;
-        *written_rows += rows;
-        *part_files += 1;
-        println!("[PUT] {key} rows={rows}");
+        result??;
     }
     Ok(())
 }
 
-async fn drain_uploads(
-    uploads: &mut JoinSet<Result<(String, usize)>>,
-    written_rows: &mut usize,
-    part_files: &mut usize,
-) -> Result<()> {
-    while !uploads.is_empty() {
-        wait_one_upload(uploads, written_rows, part_files).await?;
+async fn drain_uploads(uploads: &mut JoinSet<Result<()>>) -> Result<()> {
+    while let Some(result) = uploads.join_next().await {
+        result??;
     }
     Ok(())
 }
@@ -499,31 +462,19 @@ async fn drain_uploads(
 async fn upload_minute_part_owned(
     s3: S3Client,
     bucket: String,
-    staging_dir: PathBuf,
-    trade_date: String,
-    exchange: String,
-    part_idx: usize,
-    rows: Vec<MinuteRow>,
-) -> Result<(String, usize)> {
-    let row_count = rows.len();
-    let key = upload_minute_part(
-        &s3,
-        &bucket,
-        &staging_dir,
-        &trade_date,
-        &exchange,
-        part_idx,
-        &rows,
-    )
-    .await?;
-    Ok((key, row_count))
+    key: String,
+    local_path: PathBuf,
+) -> Result<()> {
+    upload_local_file(&s3, &bucket, &key, &local_path).await?;
+    println!("[UPLOAD] s3://{bucket}/{key}");
+    Ok(())
 }
 
 fn parse_minute_row(row: &StringRecord) -> Option<MinuteRow> {
     let symbol = row.get(0)?.trim();
     let time = row.get(1)?.trim();
     let exchange = symbol.split('.').nth(1)?.trim();
-    if exchange.is_empty() || time.len() < 19 {
+    if symbol.is_empty() || exchange.is_empty() || time.len() < 19 {
         return None;
     }
     Some(MinuteRow {
@@ -543,40 +494,12 @@ fn parse_minute_row(row: &StringRecord) -> Option<MinuteRow> {
     })
 }
 
-fn parse_opt_f64(v: Option<&str>) -> Option<f64> {
-    let raw = v?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    raw.parse::<f64>().ok()
-}
-
 fn dedup_rows(rows: Vec<MinuteRow>) -> Vec<MinuteRow> {
-    let mut keyed: BTreeMap<(String, String), MinuteRow> = BTreeMap::new();
+    let mut keyed = BTreeMap::new();
     for row in rows {
         keyed.insert((row.symbol.clone(), row.time.clone()), row);
     }
     keyed.into_values().collect()
-}
-
-async fn upload_minute_part(
-    s3: &S3Client,
-    bucket: &str,
-    staging_dir: &Path,
-    trade_date: &str,
-    exchange: &str,
-    part_idx: usize,
-    rows: &[MinuteRow],
-) -> Result<String> {
-    let parquet_bytes = to_parquet_bytes(rows)?;
-    let key = format!(
-        "curated/minute_bars_1m/trade_date={trade_date}/exchange={exchange}/part-{part_idx:03}.parquet"
-    );
-    let local_path = staging_dir.join(&key);
-    write_parquet_bytes_local(&local_path, parquet_bytes)?;
-    validate_parquet_file(&local_path)?;
-    upload_local_file(s3, bucket, &key, &local_path).await?;
-    Ok(key)
 }
 
 fn to_parquet_bytes(rows: &[MinuteRow]) -> Result<Vec<u8>> {
@@ -650,64 +573,10 @@ fn to_parquet_bytes(rows: &[MinuteRow]) -> Result<Vec<u8>> {
         .set_max_row_group_size(128 * 1024)
         .build();
     let mut cursor = Cursor::new(Vec::new());
-    let mut writer = ArrowWriter::try_new(&mut cursor, schema, Some(props))?;
-    writer.write(&batch)?;
-    writer.close()?;
+    {
+        let mut writer = ArrowWriter::try_new(&mut cursor, schema, Some(props))?;
+        writer.write(&batch)?;
+        writer.close()?;
+    }
     Ok(cursor.into_inner())
-}
-
-fn source_key(path: &Path, input_dir: &Path) -> Result<String> {
-    let meta = std::fs::metadata(path)?;
-    let size = meta.len();
-    let mtime_secs = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or_default();
-    let relative = path
-        .strip_prefix(input_dir)
-        .unwrap_or(path)
-        .to_string_lossy();
-    Ok(format!("{}\t{}\t{}", relative, size, mtime_secs))
-}
-
-fn load_manifest(path: &Path) -> Result<BTreeSet<String>> {
-    if !path.exists() {
-        return Ok(BTreeSet::new());
-    }
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("读取 manifest 失败: {}", path.display()))?;
-    Ok(raw
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
-        .collect())
-}
-
-fn append_manifest_line(path: &Path, key: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("创建 manifest 目录失败: {}", parent.display()))?;
-    }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .with_context(|| format!("打开 manifest 失败: {}", path.display()))?;
-    use std::io::Write;
-    writeln!(f, "{key}").with_context(|| format!("写入 manifest 失败: {}", path.display()))?;
-    Ok(())
-}
-
-fn env_var_any(keys: &[&str]) -> Option<String> {
-    for key in keys {
-        if let Ok(v) = env::var(key) {
-            if !v.trim().is_empty() {
-                return Some(v);
-            }
-        }
-    }
-    None
 }

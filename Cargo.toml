@@ -4,7 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace]
-members = ["tools/zip-csv-to-parquet", "vendor/qmt"]
+members = [
+    "crates/storage",
+    "crates/jobs",
+    "tools/zip-csv-to-parquet",
+    "vendor/qmt",
+]
 
 [[bin]]
 name = "rstock"
@@ -14,25 +19,14 @@ path = "src/main.rs"
 anyhow = "1"
 apalis = "0.7.4"
 apalis-cron = "0.7.4"
-arrow-array = "56"
-arrow-schema = "56"
 axum = "0.8"
-bytes = "1"
-clap = { version = "4", features = ["derive", "env"] }
-dotenvy = "0.15"
 chrono = { version = "0.4", features = ["serde"] }
-parquet = { version = "56", features = ["arrow"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-minio = "0.3.0"
+storage = { package = "rstock-storage", path = "crates/storage" }
+jobs = { package = "rstock-jobs", path = "crates/jobs", default-features = false }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tdxrs = { path = "vendor/tdxrs", optional = true }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
-time = "=0.3.36"
-home = "=0.5.9"
-csv = "1"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+toml = "0.8"
 
 [features]
 default = ["tdx-fallback"]
-tdx-fallback = ["dep:tdxrs"]
+tdx-fallback = ["jobs/tdx-fallback"]

@@ -1,22 +1,32 @@
 use std::cmp::{max, min};
 use std::collections::{BTreeMap, BTreeSet};
-use std::env;
 use std::fs;
+use std::io::Cursor;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use arrow_array::builder::{Float64Builder, StringBuilder};
+use arrow_array::{ArrayRef, RecordBatch};
+use arrow_schema::{DataType, Field, Schema};
 use chrono::{Datelike, NaiveDate};
 use clap::Args;
+use parquet::arrow::ArrowWriter;
+use parquet::basic::Compression;
+use parquet::file::properties::WriterProperties;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 
 use crate::api::ApiClient;
 use crate::models::{DailyBar, MarketRequest, DEFAULT_QMT_API_HOST, DEFAULT_TIMEOUT_SECS};
 use crate::normalize::normalize_full_kline_response;
-use crate::s3::{build_s3_client, ensure_bucket, upload_daily_partition_file_staged, S3Settings};
 use crate::tdx_source;
 use crate::utils::{chunked, load_stock_codes_from_file};
+use storage::s3::{
+    build_s3_client, ensure_bucket, upload_local_file, validate_parquet_file,
+    write_parquet_bytes_local, S3Settings,
+};
 
 #[derive(Debug, Args, Clone)]
 pub struct SyncDailyArgs {
@@ -41,31 +51,31 @@ pub struct SyncDailyArgs {
     #[arg(long)]
     pub stock_codes_file: Option<PathBuf>,
 
-    #[arg(long, env = "QMT_API_HOST", default_value = DEFAULT_QMT_API_HOST)]
+    #[arg(long, default_value = DEFAULT_QMT_API_HOST)]
     pub base_url: String,
 
-    #[arg(long, env = "QMT_API_AUTHORIZATION")]
+    #[arg(long)]
     pub authorization: Option<String>,
 
-    #[arg(long, env = "QMT_API_TIMEOUT", default_value_t = DEFAULT_TIMEOUT_SECS)]
+    #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
     pub timeout: u64,
 
-    #[arg(long, env = "S3_BUCKET", default_value = "stock")]
+    #[arg(long, default_value = "stock")]
     pub s3_bucket: String,
 
-    #[arg(long, env = "LOCAL_STAGING_DIR", default_value = "data/staging")]
+    #[arg(long, default_value = "data/staging")]
     pub staging_dir: PathBuf,
 
-    #[arg(long, env = "S3_REGION", default_value = "us-east-1")]
+    #[arg(long, default_value = "us-east-1")]
     pub s3_region: String,
 
-    #[arg(long, env = "S3_ACCESS_KEY")]
+    #[arg(long)]
     pub s3_access_key: Option<String>,
 
-    #[arg(long, env = "S3_SECRET_KEY")]
+    #[arg(long)]
     pub s3_secret_key: Option<String>,
 
-    #[arg(long, help = "S3 endpoint，默认读取 S3_HOST 或 s3_host")]
+    #[arg(long, help = "S3 endpoint")]
     pub s3_host: Option<String>,
 }
 
@@ -111,10 +121,7 @@ pub async fn run_sync_daily(args: SyncDailyArgs) -> Result<()> {
         return Ok(());
     }
 
-    let s3_host = args
-        .s3_host
-        .or_else(|| env_var_any(&["S3_HOST", "s3_host"]))
-        .ok_or_else(|| anyhow!("缺少 S3 host，请在 .env 设置 s3_host 或 S3_HOST"))?;
+    let s3_host = args.s3_host.ok_or_else(|| anyhow!("缺少 S3 host，请在配置中提供"))?;
 
     let api = ApiClient::new(
         args.base_url,
@@ -500,11 +507,114 @@ fn stage_daily_bars_local(
             "curated/daily_bars/exchange={exchange}/year={year}/month={month}/data.parquet"
         );
         let path = staging_dir.join(&key);
-        crate::s3::write_daily_partition_file_local(&path, &deduped)?;
-        crate::s3::validate_parquet_file(&path)?;
+        write_daily_partition_file_local(&path, &deduped)?;
+        validate_parquet_file(&path)?;
         out.push((key, path, deduped.len()));
     }
     Ok(out)
+}
+
+async fn upload_daily_partition_file_staged(
+    s3: &storage::s3::S3Client,
+    bucket: &str,
+    exchange: &str,
+    year: &str,
+    month: &str,
+    bars: &[DailyBar],
+    staging_dir: &std::path::Path,
+) -> Result<String> {
+    let key =
+        format!("curated/daily_bars/exchange={exchange}/year={year}/month={month}/data.parquet");
+    let local_path = staging_dir.join(&key);
+    write_daily_partition_file_local(&local_path, bars)?;
+    validate_parquet_file(&local_path)?;
+    upload_local_file(s3, bucket, &key, &local_path).await?;
+    Ok(key)
+}
+
+fn write_daily_partition_file_local(path: &std::path::Path, bars: &[DailyBar]) -> Result<PathBuf> {
+    let parquet_bytes = daily_to_parquet_bytes(bars)?;
+    write_parquet_bytes_local(path, parquet_bytes)
+}
+
+fn daily_to_parquet_bytes(bars: &[DailyBar]) -> Result<Vec<u8>> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("exchange", DataType::Utf8, false),
+        Field::new("time", DataType::Utf8, false),
+        Field::new("open", DataType::Float64, true),
+        Field::new("high", DataType::Float64, true),
+        Field::new("low", DataType::Float64, true),
+        Field::new("close", DataType::Float64, true),
+        Field::new("volume", DataType::Float64, true),
+        Field::new("amount", DataType::Float64, true),
+        Field::new("adj_factor", DataType::Float64, true),
+        Field::new("settle", DataType::Float64, true),
+        Field::new("openInterest", DataType::Float64, true),
+    ]));
+
+    let mut symbol = StringBuilder::new();
+    let mut exchange = StringBuilder::new();
+    let mut time = StringBuilder::new();
+    let mut open = Float64Builder::new();
+    let mut high = Float64Builder::new();
+    let mut low = Float64Builder::new();
+    let mut close = Float64Builder::new();
+    let mut volume = Float64Builder::new();
+    let mut amount = Float64Builder::new();
+    let mut adj_factor = Float64Builder::new();
+    let mut settle = Float64Builder::new();
+    let mut open_interest = Float64Builder::new();
+
+    for b in bars {
+        symbol.append_value(&b.symbol);
+        exchange.append_value(&b.exchange);
+        time.append_value(&b.time);
+        open.append_option(b.open);
+        high.append_option(b.high);
+        low.append_option(b.low);
+        close.append_option(b.close);
+        volume.append_option(b.volume);
+        amount.append_option(b.amount);
+        adj_factor.append_option(b.adj_factor);
+        settle.append_option(b.settle);
+        open_interest.append_option(b.open_interest);
+    }
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(symbol.finish()) as ArrayRef,
+            Arc::new(exchange.finish()) as ArrayRef,
+            Arc::new(time.finish()) as ArrayRef,
+            Arc::new(open.finish()) as ArrayRef,
+            Arc::new(high.finish()) as ArrayRef,
+            Arc::new(low.finish()) as ArrayRef,
+            Arc::new(close.finish()) as ArrayRef,
+            Arc::new(volume.finish()) as ArrayRef,
+            Arc::new(amount.finish()) as ArrayRef,
+            Arc::new(adj_factor.finish()) as ArrayRef,
+            Arc::new(settle.finish()) as ArrayRef,
+            Arc::new(open_interest.finish()) as ArrayRef,
+        ],
+    )?;
+
+    let props = WriterProperties::builder()
+        .set_compression(Compression::SNAPPY)
+        .set_max_row_group_size(128 * 1024)
+        .build();
+    let mut cursor = Cursor::new(Vec::new());
+    {
+        let mut writer = ArrowWriter::try_new(&mut cursor, schema, Some(props))?;
+        writer.write(&batch)?;
+        writer.close()?;
+    }
+
+    let bytes = cursor.into_inner();
+    if bytes.is_empty() {
+        return Err(anyhow!("empty parquet bytes"));
+    }
+    Ok(bytes)
 }
 
 fn dedup_daily_rows(rows: Vec<DailyBar>) -> Vec<DailyBar> {
@@ -572,17 +682,6 @@ fn dashed_date(input: &str) -> Result<String> {
     ))
 }
 
-fn env_var_any(keys: &[&str]) -> Option<String> {
-    for key in keys {
-        if let Ok(v) = env::var(key) {
-            if !v.trim().is_empty() {
-                return Some(v);
-            }
-        }
-    }
-    None
-}
-
 fn parse_compact_date(input: &str) -> Result<NaiveDate> {
     NaiveDate::parse_from_str(input, "%Y%m%d")
         .with_context(|| format!("无效日期: {input}，应为 YYYYMMDD"))
@@ -635,7 +734,6 @@ mod tests {
     use super::{dedup_daily_rows, fetch_daily_bars_with_fallback, stage_daily_bars_local};
     use crate::api::ApiClient;
     use crate::models::{DailyBar, DEFAULT_QMT_API_HOST, DEFAULT_TIMEOUT_SECS};
-    use crate::s3::write_daily_partition_file_local;
     use anyhow::Result;
     use parquet::file::reader::{FileReader, SerializedFileReader};
     use parquet::record::RowAccessor;
@@ -694,7 +792,6 @@ mod tests {
     #[tokio::test]
     #[ignore = "hits real QMT/TDX and stages parquet locally"]
     async fn real_daily_sync_stages_remote_rows_without_upload() -> Result<()> {
-        dotenvy::dotenv().ok();
         let api = ApiClient::new(
             std::env::var("QMT_API_HOST").unwrap_or_else(|_| DEFAULT_QMT_API_HOST.to_string()),
             std::env::var("QMT_API_AUTHORIZATION").ok(),

@@ -126,6 +126,15 @@ impl PatternDetector for LimitUpPullbackDetector {
                 continue;
             }
 
+            let support_price = bars[limit_idx].close * self.support_ratio;
+            let resistance_price = bars[limit_idx].close * self.resistance_ratio;
+            let has_lower_close = pullback_closes
+                .iter()
+                .any(|close| *close < bars[limit_idx].close);
+            let has_volume_shrinkage = bars[pullback_start..=latest_idx]
+                .iter()
+                .any(|bar| bar.volume <= shrink_threshold);
+
             let vol_ratio = indicators
                 .volume_ma5
                 .get(latest_idx)
@@ -141,12 +150,22 @@ impl PatternDetector for LimitUpPullbackDetector {
                 &["price-action", "volume-confirmed"],
                 "最近出现放量涨停，随后回调未破关键支撑，最新一日转强。",
                 json!({
+                    "key_date": bars[limit_idx].time.format("%Y-%m-%d").to_string(),
+                    "key_date_type": "涨停日",
                     "limit_up_date": bars[limit_idx].time.format("%Y-%m-%d").to_string(),
                     "pullback_days": pullback_days,
                     "pullback_range": pullback_range,
                     "volume_ratio": bars[limit_idx].volume / baseline_volume,
-                    "support_price": bars[limit_idx].close * self.support_ratio,
+                    "support_price": support_price,
+                    "resistance_price": resistance_price,
+                    "has_lower_close": has_lower_close,
+                    "has_volume_shrinkage": has_volume_shrinkage,
                     "latest_volume_ratio": vol_ratio,
+                    "reasons": [
+                        format!("涨停日量比 {:.2}", bars[limit_idx].volume / baseline_volume),
+                        format!("回调 {} 天，区间振幅 {:.2}%", pullback_days, pullback_range * 100.0),
+                        format!("回调期间未破支撑 {:.2}，且至少出现一次缩量", support_price),
+                    ],
                 }),
             ));
         }

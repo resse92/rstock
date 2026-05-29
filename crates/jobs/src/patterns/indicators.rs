@@ -19,6 +19,7 @@ pub struct SeriesIndicators {
     pub boll_mid: Vec<Option<f64>>,
     pub boll_upper: Vec<Option<f64>>,
     pub boll_lower: Vec<Option<f64>>,
+    pub rsi14: Vec<Option<f64>>,
     pub short_trend: Vec<Option<f64>>,
     pub bull_bear_line: Vec<Option<f64>>,
 }
@@ -73,6 +74,7 @@ impl SeriesIndicators {
                 _ => (None, None),
             })
             .unzip();
+        let rsi14 = rsi(&closes, 14);
 
         let short_trend = ema_optional(&ema(&closes, 10), 10);
         let ma14 = rolling_mean(&closes, 14);
@@ -104,6 +106,7 @@ impl SeriesIndicators {
             boll_mid,
             boll_upper,
             boll_lower,
+            rsi14,
             short_trend,
             bull_bear_line,
         }
@@ -243,6 +246,49 @@ fn smooth(values: &[Option<f64>], period: usize) -> Vec<Option<f64>> {
             None => out.push(None),
         }
     }
+    out
+}
+
+fn rsi(values: &[f64], period: usize) -> Vec<Option<f64>> {
+    let mut out = vec![None; values.len()];
+    if values.len() <= period {
+        return out;
+    }
+
+    let mut gains = 0.0;
+    let mut losses = 0.0;
+    for idx in 1..=period {
+        let diff = values[idx] - values[idx - 1];
+        if diff >= 0.0 {
+            gains += diff;
+        } else {
+            losses += -diff;
+        }
+    }
+
+    let mut avg_gain = gains / period as f64;
+    let mut avg_loss = losses / period as f64;
+    out[period] = Some(if avg_loss <= f64::EPSILON {
+        100.0
+    } else {
+        let rs = avg_gain / avg_loss;
+        100.0 - 100.0 / (1.0 + rs)
+    });
+
+    for idx in period + 1..values.len() {
+        let diff = values[idx] - values[idx - 1];
+        let gain = diff.max(0.0);
+        let loss = (-diff).max(0.0);
+        avg_gain = (avg_gain * (period as f64 - 1.0) + gain) / period as f64;
+        avg_loss = (avg_loss * (period as f64 - 1.0) + loss) / period as f64;
+        out[idx] = Some(if avg_loss <= f64::EPSILON {
+            100.0
+        } else {
+            let rs = avg_gain / avg_loss;
+            100.0 - 100.0 / (1.0 + rs)
+        });
+    }
+
     out
 }
 

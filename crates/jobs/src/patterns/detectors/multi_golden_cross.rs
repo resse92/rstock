@@ -16,8 +16,22 @@ use super::PatternDetector;
 use crate::patterns::indicators::SeriesIndicators;
 use crate::patterns::model::{BarSeries, PatternSignal};
 
-#[derive(Debug, Clone, Default)]
-pub struct MultiGoldenCrossDetector;
+#[derive(Debug, Clone)]
+pub struct MultiGoldenCrossDetector {
+    pub lookback_days: usize,
+    pub resonance_days: usize,
+    pub min_volume_ratio: f64,
+}
+
+impl Default for MultiGoldenCrossDetector {
+    fn default() -> Self {
+        Self {
+            lookback_days: 10,
+            resonance_days: 3,
+            min_volume_ratio: 1.0,
+        }
+    }
+}
 
 impl PatternDetector for MultiGoldenCrossDetector {
     fn id(&self) -> &'static str {
@@ -32,7 +46,7 @@ impl PatternDetector for MultiGoldenCrossDetector {
         let mut ma_cross_day = None;
         let mut kdj_cross_day = None;
         let mut macd_cross_day = None;
-        let start = idx.saturating_sub(3);
+        let start = idx.saturating_sub(self.lookback_days.saturating_sub(1));
         for day in start..=idx {
             if day == 0 {
                 continue;
@@ -69,10 +83,11 @@ impl PatternDetector for MultiGoldenCrossDetector {
         let short_trend = indicators.short_trend[idx]?;
         let bull_bear = indicators.bull_bear_line[idx]?;
         let volume_ratio = latest.volume / vol_ma5.max(1e-6);
-        if max_day - min_day <= 1
+        let max_gap = max_day - min_day;
+        if max_gap <= self.resonance_days
             && latest.close > ma5
             && latest.close > ma20
-            && volume_ratio >= 1.0
+            && volume_ratio >= self.min_volume_ratio
         {
             return Some(signal(
                 self.id(),
@@ -83,10 +98,11 @@ impl PatternDetector for MultiGoldenCrossDetector {
                 "均线、KDJ、MACD 在短周期内形成多金叉共振。",
                 json!({
                     "key_date": series.bars[min_day].time.format("%Y-%m-%d").to_string(),
+                    "key_date_type": "多金叉共振日",
                     "ma_cross_date": series.bars[ma_day].time.format("%Y-%m-%d").to_string(),
                     "kdj_cross_date": series.bars[kdj_day].time.format("%Y-%m-%d").to_string(),
                     "macd_cross_date": series.bars[macd_day].time.format("%Y-%m-%d").to_string(),
-                    "max_gap_days": max_day - min_day,
+                    "max_gap_days": max_gap,
                     "ma5": ma5,
                     "ma20": ma20,
                     "k": k,
@@ -98,6 +114,7 @@ impl PatternDetector for MultiGoldenCrossDetector {
                     "volume_ratio": volume_ratio,
                     "short_term_trend": short_trend,
                     "bull_bear_line": bull_bear,
+                    "reasons": ["均线金叉", "KDJ金叉", "MACD金叉", "多指标共振"],
                 }),
             ));
         }

@@ -16,8 +16,16 @@ use super::PatternDetector;
 use crate::patterns::indicators::SeriesIndicators;
 use crate::patterns::model::{BarSeries, PatternSignal};
 
-#[derive(Debug, Clone, Default)]
-pub struct TrendStartDetector;
+#[derive(Debug, Clone)]
+pub struct TrendStartDetector {
+    pub volume_ratio: f64,
+}
+
+impl Default for TrendStartDetector {
+    fn default() -> Self {
+        Self { volume_ratio: 1.2 }
+    }
+}
 
 impl PatternDetector for TrendStartDetector {
     fn id(&self) -> &'static str {
@@ -43,7 +51,7 @@ impl PatternDetector for TrendStartDetector {
 
         let macd_cross = dif_today > 0.0 && dif_yesterday <= dea_yesterday && dif_today > dea_today;
         let boll_cross = yesterday.close < boll_yesterday && today.close > boll_today;
-        let volume_ok = volume_ratio > 1.2;
+        let volume_ok = volume_ratio > self.volume_ratio;
         if macd_cross && boll_cross && is_bullish(today) && today.close > ma5 && volume_ok {
             return Some(signal(
                 self.id(),
@@ -53,12 +61,15 @@ impl PatternDetector for TrendStartDetector {
                 &["trend", "macd", "boll"],
                 "MACD金叉、布林带上穿中轨、阳线站上5日线并伴随量能放大。",
                 json!({
+                    "key_date": today.time.format("%Y-%m-%d").to_string(),
+                    "pattern_type": "today_macd_today_boll",
                     "dif": dif_today,
                     "dea": dea_today,
                     "boll_mid": boll_today,
                     "ma5": ma5,
                     "close": today.close,
                     "volume_ratio": volume_ratio,
+                    "reasons": ["今日MACD金叉+布林带上穿+阳线+站上5日线+量能放大"],
                 }),
             ));
         }

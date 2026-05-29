@@ -10,6 +10,7 @@ pub mod resistance_breakout;
 pub mod strategy_2560_selection;
 pub mod strong_wash_weak_to_strong;
 pub mod trend_acceleration_inflection;
+pub mod trend_resonance_reversal;
 pub mod trend_start;
 pub mod w_bottom;
 
@@ -32,6 +33,7 @@ pub use resistance_breakout::ResistanceBreakoutDetector;
 pub use strategy_2560_selection::Strategy2560SelectionDetector;
 pub use strong_wash_weak_to_strong::StrongWashWeakToStrongDetector;
 pub use trend_acceleration_inflection::TrendAccelerationInflectionDetector;
+pub use trend_resonance_reversal::TrendResonanceReversalDetector;
 pub use trend_start::TrendStartDetector;
 pub use w_bottom::WBottomDetector;
 
@@ -46,6 +48,7 @@ pub fn default_detectors() -> Vec<Box<dyn PatternDetector>> {
         Box::new(ResistanceBreakoutDetector::default()),
         Box::new(StrongWashWeakToStrongDetector::default()),
         Box::new(TrendAccelerationInflectionDetector::default()),
+        Box::new(TrendResonanceReversalDetector::default()),
         Box::new(ImmortalGuidanceDetector::default()),
         Box::new(WBottomDetector::default()),
         Box::new(TrendStartDetector::default()),

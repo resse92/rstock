@@ -10,7 +10,8 @@ pub use detectors::{
     LimitUpPullbackDetector, LimitUpSidewaysDetector, MorningStarDetector,
     MultiGoldenCrossDetector, MultiPartyCannonDetector, PatternDetector,
     ResistanceBreakoutDetector, Strategy2560SelectionDetector, StrongWashWeakToStrongDetector,
-    TrendAccelerationInflectionDetector, TrendStartDetector, WBottomDetector,
+    TrendAccelerationInflectionDetector, TrendResonanceReversalDetector, TrendStartDetector,
+    WBottomDetector,
 };
 pub use model::{
     Bar, BarSeries, PatternCacheConfig, PatternScanReport, PatternScanRequest, PatternSignal,

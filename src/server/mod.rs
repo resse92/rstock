@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod errors;
+mod patterns;
 
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -14,10 +15,14 @@ use axum::{Json, Router};
 use chrono::{Local, Utc};
 use serde::Deserialize;
 use tokio::net::TcpListener;
+use tracing::{error, info};
 
 use self::app::AppState;
 pub use self::config::ServerConfig;
 use self::errors::{ok, ApiError, ApiResponse};
+use self::patterns::{
+    check_all_patterns, check_single_pattern, list_patterns, scan_market_by_pattern,
+};
 use jobs::sync_daily::{run_sync_daily, SyncDailyArgs};
 use jobs::sync_minute::{run_sync_minute, SyncMinuteArgs};
 
@@ -43,12 +48,16 @@ pub async fn run_server(args: ServerConfig) -> Result<()> {
         .route("/healthz", get(healthz))
         .route("/api/v1/sync/daily", post(sync_daily_range))
         .route("/api/v1/sync/minute", post(sync_minute_range))
+        .route("/api/v1/patterns/check", post(check_single_pattern))
+        .route("/api/v1/patterns/check-all", post(check_all_patterns))
+        .route("/api/v1/patterns/list", get(list_patterns))
+        .route("/api/v1/patterns/scan-market", post(scan_market_by_pattern))
         .with_state(state.clone());
 
     let listener = TcpListener::bind(state.args.bind)
         .await
         .with_context(|| format!("bind {} failed", state.args.bind))?;
-    println!("[HTTP] listening on {}", state.args.bind);
+    info!(bind = %state.args.bind, "http server listening");
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -76,13 +85,13 @@ fn spawn_cron_workers(state: AppState) -> Result<()> {
 async fn handle_daily_cron(_: DailyCron, _: CronContext<Utc>, data: Data<AppState>) {
     let date = today();
     if let Err(err) = sync_daily_range_inner((*data).clone(), date.clone(), date).await {
-        eprintln!("[CRON][daily] {err:#}");
+        error!(error = ?err, "daily cron failed");
     }
 }
 
 async fn handle_minute_cron(_: MinuteCron, _: CronContext<Utc>, data: Data<AppState>) {
     if let Err(err) = sync_minute_for_date((*data).clone(), today()).await {
-        eprintln!("[CRON][minute] {err:#}");
+        error!(error = ?err, "minute cron failed");
     }
 }
 

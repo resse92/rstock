@@ -11,6 +11,14 @@ pub struct DuckDbPatternCache {
     config: PatternCacheConfig,
 }
 
+#[derive(Debug, Clone)]
+pub struct SeriesRangeSummary {
+    pub symbol: String,
+    pub min_date: NaiveDate,
+    pub max_date: NaiveDate,
+    pub bar_count: usize,
+}
+
 impl DuckDbPatternCache {
     pub fn new(config: PatternCacheConfig) -> Result<Self> {
         let cache = Self { config };
@@ -39,6 +47,46 @@ impl DuckDbPatternCache {
         Ok(latest)
     }
 
+    pub fn series_range_summaries(
+        &self,
+        symbols: &[String],
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+    ) -> Result<HashMap<String, SeriesRangeSummary>> {
+        let conn = self.open()?;
+        let mut stmt = conn.prepare(
+            "SELECT symbol, MIN(trade_date) AS min_date, MAX(trade_date) AS max_date, COUNT(*) AS bar_count
+             FROM daily_bars
+             WHERE symbol = ? AND trade_date >= ? AND trade_date <= ?
+             GROUP BY symbol",
+        )?;
+
+        let start = start_date.format("%Y-%m-%d").to_string();
+        let end = end_date.format("%Y-%m-%d").to_string();
+        let mut summaries = HashMap::new();
+
+        for symbol in symbols {
+            let mut rows = stmt.query(params![symbol, &start, &end])?;
+            while let Some(row) = rows.next()? {
+                let symbol: String = row.get(0)?;
+                let min_date = NaiveDate::parse_from_str(&row.get::<_, String>(1)?, "%Y-%m-%d")?;
+                let max_date = NaiveDate::parse_from_str(&row.get::<_, String>(2)?, "%Y-%m-%d")?;
+                let bar_count: i64 = row.get(3)?;
+                summaries.insert(
+                    symbol.clone(),
+                    SeriesRangeSummary {
+                        symbol,
+                        min_date,
+                        max_date,
+                        bar_count: bar_count.max(0) as usize,
+                    },
+                );
+            }
+        }
+
+        Ok(summaries)
+    }
+
     pub fn upsert_daily_bars(&self, bars: &[Bar]) -> Result<()> {
         if bars.is_empty() {
             return Ok(());
@@ -49,8 +97,8 @@ impl DuckDbPatternCache {
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO daily_bars (
-                    symbol, exchange, trade_date, open, high, low, close, volume, amount, source, updated_at
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    symbol, exchange, trade_date, open, high, low, close, volume, amount, source
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(symbol, trade_date) DO UPDATE SET
                     exchange = excluded.exchange,
                     open = excluded.open,
@@ -60,7 +108,7 @@ impl DuckDbPatternCache {
                     volume = excluded.volume,
                     amount = excluded.amount,
                     source = excluded.source,
-                    updated_at = CURRENT_TIMESTAMP",
+                    updated_at = now()",
             )?;
 
             for bar in bars {

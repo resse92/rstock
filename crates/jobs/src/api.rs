@@ -22,7 +22,8 @@ impl ApiClient {
         authorization: Option<String>,
         timeout: Duration,
     ) -> Result<Self> {
-        let endpoint = Endpoint::from_shared(normalize_base_url(&base_url.into()))?.timeout(timeout);
+        let endpoint =
+            Endpoint::from_shared(normalize_base_url(&base_url.into()))?.timeout(timeout);
         let client = QmtClient::from_endpoint_with_authorization(endpoint, authorization)
             .map_err(|err| anyhow!("failed to initialize qmt grpc client: {err}"))?;
         Ok(Self { client })
@@ -44,7 +45,17 @@ impl ApiClient {
             .data()
             .get_kline_history(request)
             .await
-            .context("调用 gRPC GetKlineHistory 失败")?
+            .with_context(|| {
+                format!(
+                    "调用 gRPC GetKlineHistory 失败: symbols={}, period={}, start_date={}, end_date={}, adjust_type={}, fill_data={}",
+                    req.stock_codes.join(","),
+                    req.period,
+                    req.start_date,
+                    req.end_date,
+                    req.adjust_type,
+                    req.fill_data
+                )
+            })?
             .into_inner();
 
         ensure_status_ok(response.status.as_ref(), "GetKlineHistory")?;
@@ -65,7 +76,10 @@ impl ApiClient {
     }
 
     pub async fn discover_all_stock_codes(&self) -> Result<Vec<String>> {
-        let v = self.fetch_sectors().await.context("调用 GetSectorList 失败")?;
+        let v = self
+            .fetch_sectors()
+            .await
+            .context("调用 GetSectorList 失败")?;
         let codes: BTreeSet<String> = extract_stock_list(&v)
             .into_iter()
             .filter(|code| is_hsba_a_share(code))

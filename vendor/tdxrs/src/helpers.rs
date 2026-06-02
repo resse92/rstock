@@ -61,8 +61,7 @@ pub fn get_volume(vol: i64) -> f64 {
     let dbl_xmm4 = if hleax > 0x80 {
         let dwtmpeax = dw_edx + 1;
         let tmpdbl_xmm3 = 2.0_f64.powi(dwtmpeax as i32);
-        let dbl_xmm0 = 2.0_f64.powi(dw_edx as i32) * 128.0
-            + (hleax & 0x7F) as f64 * tmpdbl_xmm3;
+        let dbl_xmm0 = 2.0_f64.powi(dw_edx as i32) * 128.0 + (hleax & 0x7F) as f64 * tmpdbl_xmm3;
         dbl_xmm0
     } else {
         if dw_edx >= 0 {

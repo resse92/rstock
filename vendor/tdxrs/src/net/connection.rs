@@ -10,9 +10,8 @@ pub struct TcpConnection {
 impl TcpConnection {
     pub fn connect(ip: &str, port: u16, timeout_secs: f64) -> Result<Self> {
         let addr = format!("{}:{}", ip, port);
-        let stream = TcpStream::connect(&addr).map_err(|e| {
-            TdxError::Connection(format!("Failed to connect to {}: {}", addr, e))
-        })?;
+        let stream = TcpStream::connect(&addr)
+            .map_err(|e| TdxError::Connection(format!("Failed to connect to {}: {}", addr, e)))?;
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs_f64(timeout_secs)))
             .map_err(|e| TdxError::Connection(format!("set_read_timeout: {}", e)))?;
@@ -23,9 +22,9 @@ impl TcpConnection {
     }
 
     pub fn send(&mut self, data: &[u8]) -> Result<()> {
-        self.stream.write_all(data).map_err(|e| {
-            TdxError::Connection(format!("send failed: {}", e))
-        })?;
+        self.stream
+            .write_all(data)
+            .map_err(|e| TdxError::Connection(format!("send failed: {}", e)))?;
         Ok(())
     }
 
@@ -34,9 +33,10 @@ impl TcpConnection {
         let mut buf = vec![0u8; len];
         let mut total = 0;
         while total < len {
-            let n = self.stream.read(&mut buf[total..]).map_err(|e| {
-                TdxError::Connection(format!("recv failed: {}", e))
-            })?;
+            let n = self
+                .stream
+                .read(&mut buf[total..])
+                .map_err(|e| TdxError::Connection(format!("recv failed: {}", e)))?;
             if n == 0 {
                 return Err(TdxError::Disconnected);
             }

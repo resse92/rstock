@@ -29,7 +29,9 @@ pub struct FinancialRecord {
 ///   Report Data: at each offset, report_size/4 little-endian f32 values
 pub fn parse_financial(data: &[u8]) -> Result<Vec<FinancialRecord>> {
     if data.len() < HEADER_SIZE {
-        return Err(TdxError::InvalidData("Financial file too small for header".into()));
+        return Err(TdxError::InvalidData(
+            "Financial file too small for header".into(),
+        ));
     }
 
     // Parse header

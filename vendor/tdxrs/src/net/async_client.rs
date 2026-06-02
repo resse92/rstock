@@ -61,17 +61,10 @@ impl AsyncTdxHqClient {
                 _ => continue,
             }
         }
-        Err(TdxError::Connection(
-            "All servers unreachable".into(),
-        ))
+        Err(TdxError::Connection("All servers unreachable".into()))
     }
 
-    async fn connect_internal(
-        &self,
-        ip: &str,
-        port: u16,
-        timeout: Option<f64>,
-    ) -> Result<bool> {
+    async fn connect_internal(&self, ip: &str, port: u16, timeout: Option<f64>) -> Result<bool> {
         let timeout_secs = timeout.unwrap_or(CONNECT_TIMEOUT);
         let mut tcp = AsyncTcpConnection::connect(ip, port, timeout_secs).await?;
 
@@ -124,8 +117,7 @@ impl AsyncTdxHqClient {
 
     /// 是否已连接
     pub fn is_connected(&self) -> bool {
-        self.connected
-            .load(std::sync::atomic::Ordering::SeqCst)
+        self.connected.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// 设置缓存 TTL
@@ -161,9 +153,9 @@ impl AsyncTdxHqClient {
         if header.zip_size != header.unzip_size {
             let mut decoder = ZlibDecoder::new(&body_buf[..]);
             let mut decompressed = Vec::new();
-            decoder.read_to_end(&mut decompressed).map_err(|e| {
-                TdxError::ResponseParse(format!("zlib decompress failed: {}", e))
-            })?;
+            decoder
+                .read_to_end(&mut decompressed)
+                .map_err(|e| TdxError::ResponseParse(format!("zlib decompress failed: {}", e)))?;
             Ok(decompressed)
         } else {
             Ok(body_buf)
@@ -189,7 +181,9 @@ impl AsyncTdxHqClient {
             .map(|x| x.year as u32 * 10000 + x.month as u32 * 100 + x.day as u32)
             .min();
 
-        let Some(ee_date) = earliest_event else { return Vec::new() };
+        let Some(ee_date) = earliest_event else {
+            return Vec::new();
+        };
 
         let first_bar_date =
             bars[0].year as u32 * 10000 + bars[0].month as u32 * 100 + bars[0].day as u32;
@@ -203,7 +197,14 @@ impl AsyncTdxHqClient {
         let mut offset = max_per_page;
 
         for _page in 0..8 {
-            let pkt = utils::build_security_bars_packet(category, market, code, offset, MAX_KLINE_COUNT, 0);
+            let pkt = utils::build_security_bars_packet(
+                category,
+                market,
+                code,
+                offset,
+                MAX_KLINE_COUNT,
+                0,
+            );
             let body = match self.send_and_recv(&pkt).await {
                 Ok(b) => b,
                 Err(_) => break,
@@ -255,7 +256,9 @@ impl AsyncTdxHqClient {
             if let Ok(xdxr) = self.get_xdxr_info(market, code).await {
                 use crate::protocol::adjuster::{adjust_security_bars, FqType};
                 let fq_enum = if fq == 2 { FqType::Hfq } else { FqType::Qfq };
-                let context = self.fetch_context_bars_for_adjust(category, market, code, &bars, &xdxr).await;
+                let context = self
+                    .fetch_context_bars_for_adjust(category, market, code, &bars, &xdxr)
+                    .await;
                 adjust_security_bars(&mut bars, &context, &xdxr, fq_enum);
             }
         }
@@ -336,11 +339,7 @@ impl AsyncTdxHqClient {
         parse_security_quotes(&body)
     }
 
-    pub async fn get_security_list(
-        &self,
-        market: u8,
-        start: u16,
-    ) -> Result<Vec<SecurityInfo>> {
+    pub async fn get_security_list(&self, market: u8, start: u16) -> Result<Vec<SecurityInfo>> {
         if start == 0 {
             let cache = self.list_cache.lock().await;
             if let Some(entry) = cache.get(&market) {

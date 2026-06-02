@@ -81,7 +81,11 @@ impl TdxDirectClient {
     ) -> Vec<SecurityBar> {
         utils::fetch_context_bars_for_adjust(
             |pkt| self.send_and_recv(pkt),
-            category, market, code, bars, xdxr,
+            category,
+            market,
+            code,
+            bars,
+            xdxr,
         )
     }
 
@@ -104,7 +108,8 @@ impl TdxDirectClient {
             if let Ok(xdxr) = self.get_xdxr_info(market, code) {
                 use crate::protocol::adjuster::{adjust_security_bars, FqType};
                 let fq_enum = if fq == 2 { FqType::Hfq } else { FqType::Qfq };
-                let context = self.fetch_context_bars_for_adjust(category, market, code, &bars, &xdxr);
+                let context =
+                    self.fetch_context_bars_for_adjust(category, market, code, &bars, &xdxr);
                 adjust_security_bars(&mut bars, &context, &xdxr, fq_enum);
             }
         }
@@ -131,10 +136,7 @@ impl TdxDirectClient {
     // 实时行情
     // ================================================================
 
-    pub fn get_security_quotes(
-        &self,
-        all_stock: &[(u8, &str)],
-    ) -> Result<Vec<SecurityQuote>> {
+    pub fn get_security_quotes(&self, all_stock: &[(u8, &str)]) -> Result<Vec<SecurityQuote>> {
         let stock_len = all_stock.len() as u16;
         let pkgdatalen = (stock_len as u32) * 7 + 12;
         let mut pkt = Vec::with_capacity(26 + stock_len as usize * 7);
@@ -181,11 +183,7 @@ impl TdxDirectClient {
     // 分时数据
     // ================================================================
 
-    pub fn get_minute_time_data(
-        &self,
-        market: u8,
-        code: &str,
-    ) -> Result<Vec<MinuteTimePrice>> {
+    pub fn get_minute_time_data(&self, market: u8, code: &str) -> Result<Vec<MinuteTimePrice>> {
         let code_buf = utils::code_bytes(code);
         let mut pkt = Vec::with_capacity(24);
         pkt.extend_from_slice(&[

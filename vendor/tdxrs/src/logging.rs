@@ -16,8 +16,12 @@ static LEVEL: AtomicU8 = AtomicU8::new(WARN);
 pub fn init() {
     let lvl = if let Ok(v) = std::env::var("TDXRS_LOG") {
         match v.to_lowercase().as_str() {
-            "off" => OFF, "error" => ERROR, "warn" => WARN,
-            "info" => INFO, "debug" => DEBUG, _ => WARN,
+            "off" => OFF,
+            "error" => ERROR,
+            "warn" => WARN,
+            "info" => INFO,
+            "debug" => DEBUG,
+            _ => WARN,
         }
     } else if cfg!(debug_assertions) {
         DEBUG
@@ -33,7 +37,11 @@ pub fn set_level(lvl: u8) {
 
 pub fn level_str(lvl: u8) -> &'static str {
     match lvl {
-        ERROR => "E", WARN => "W", INFO => "I", DEBUG => "D", _ => ""
+        ERROR => "E",
+        WARN => "W",
+        INFO => "I",
+        DEBUG => "D",
+        _ => "",
     }
 }
 
@@ -74,7 +82,9 @@ macro_rules! loge {
 }
 
 #[inline]
-pub fn level() -> u8 { LEVEL.load(Ordering::Relaxed) }
+pub fn level() -> u8 {
+    LEVEL.load(Ordering::Relaxed)
+}
 
 // ================================================================
 // 单元测试

@@ -99,7 +99,9 @@ impl TdxFinanceClient {
 
         let meta = fs::metadata(&path).ok()?;
         let mtime = meta.modified().ok()?;
-        let age = SystemTime::now().duration_since(mtime).unwrap_or(Duration::MAX);
+        let age = SystemTime::now()
+            .duration_since(mtime)
+            .unwrap_or(Duration::MAX);
 
         if age > CACHE_TTL {
             return None; // 过期
@@ -144,9 +146,9 @@ impl TdxFinanceClient {
         if header.zip_size != header.unzip_size {
             let mut decoder = ZlibDecoder::new(&body_buf[..]);
             let mut decompressed = Vec::new();
-            decoder.read_to_end(&mut decompressed).map_err(|e| {
-                TdxError::ResponseParse(format!("zlib decompress: {}", e))
-            })?;
+            decoder
+                .read_to_end(&mut decompressed)
+                .map_err(|e| TdxError::ResponseParse(format!("zlib decompress: {}", e)))?;
             Ok(decompressed)
         } else {
             Ok(body_buf)
@@ -218,11 +220,7 @@ impl TdxFinanceClient {
     }
 
     /// 下载完整的报告文件 (自动分片 + 重组, 优先磁盘缓存)
-    pub fn get_report_file_by_size(
-        &self,
-        filename: &str,
-        filesize: u32,
-    ) -> Result<Vec<u8>> {
+    pub fn get_report_file_by_size(&self, filename: &str, filesize: u32) -> Result<Vec<u8>> {
         // 1. 检查磁盘缓存
         if let Some(cached) = self.cache_get(filename) {
             return Ok(cached);
@@ -248,9 +246,13 @@ impl TdxFinanceClient {
             let mut data = first;
             for page in 1u32..4 {
                 let chunk = self.get_report_file(filename, page * CHUNK_SIZE)?;
-                if chunk.is_empty() { break; }
+                if chunk.is_empty() {
+                    break;
+                }
                 data.extend_from_slice(&chunk);
-                if chunk.len() < CHUNK_SIZE as usize { break; }
+                if chunk.len() < CHUNK_SIZE as usize {
+                    break;
+                }
             }
             return Ok(data);
         }
@@ -298,7 +300,11 @@ impl TdxFinanceClient {
     }
 
     /// 下载并解析指定的 gpcw*.dat 报告期数据 (优先磁盘缓存)
-    pub fn get_financial_data(&self, filename: &str, filesize: u32) -> Result<Vec<FinancialRecord>> {
+    pub fn get_financial_data(
+        &self,
+        filename: &str,
+        filesize: u32,
+    ) -> Result<Vec<FinancialRecord>> {
         let full = format!("tdxfin/{}", filename);
         let data = self.get_report_file_by_size(&full, filesize)?;
         parse_financial(&data)
@@ -318,11 +324,14 @@ impl TdxFinanceClient {
         let records = self.get_financial_data(filename, filesize)?;
         for r in &records {
             if r.code == code {
-                return Ok(crate::protocol::finance_fields::extract_indicators(&r.fields));
+                return Ok(crate::protocol::finance_fields::extract_indicators(
+                    &r.fields,
+                ));
             }
         }
         Err(TdxError::ResponseParse(format!(
-            "stock {} not found in {}", code, filename
+            "stock {} not found in {}",
+            code, filename
         )))
     }
 
@@ -336,11 +345,14 @@ impl TdxFinanceClient {
         let records = self.get_financial_data(filename, filesize)?;
         for r in &records {
             if r.code == code {
-                return Ok(crate::protocol::finance_fields::extract_with_labels(&r.fields));
+                return Ok(crate::protocol::finance_fields::extract_with_labels(
+                    &r.fields,
+                ));
             }
         }
         Err(TdxError::ResponseParse(format!(
-            "stock {} not found in {}", code, filename
+            "stock {} not found in {}",
+            code, filename
         )))
     }
 }

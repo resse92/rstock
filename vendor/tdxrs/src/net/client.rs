@@ -40,10 +40,7 @@ pub struct TdxHqClient {
 impl TdxHqClient {
     pub fn new() -> Self {
         let config = PoolConfig::default();
-        let default_server = (
-            PRIMARY_SERVERS[0].1.to_string(),
-            PRIMARY_SERVERS[0].2,
-        );
+        let default_server = (PRIMARY_SERVERS[0].1.to_string(), PRIMARY_SERVERS[0].2);
         Self {
             pool: Mutex::new(Arc::new(ConnectionPool::new_single(default_server, config))),
             connected: Arc::new(AtomicBool::new(false)),
@@ -95,9 +92,7 @@ impl TdxHqClient {
             }
         }
 
-        Err(TdxError::Connection(
-            "All servers unreachable".into(),
-        ))
+        Err(TdxError::Connection("All servers unreachable".into()))
     }
 
     // ================================================================
@@ -284,7 +279,11 @@ impl TdxHqClient {
         let pool = Arc::clone(&self.pool.lock().unwrap());
         let connected = Arc::clone(&self.connected);
         let stop_clone = stop.clone();
-        let server = self.last_server.lock().unwrap().clone()
+        let server = self
+            .last_server
+            .lock()
+            .unwrap()
+            .clone()
             .unwrap_or_else(|| (PRIMARY_SERVERS[0].1.to_string(), PRIMARY_SERVERS[0].2));
         let interval = Duration::from_secs_f64(DEFAULT_HEARTBEAT_INTERVAL);
 
@@ -301,8 +300,7 @@ impl TdxHqClient {
                         let conn = guard.conn();
                         let mut packet = Vec::with_capacity(18);
                         packet.extend_from_slice(&[
-                            0x0c, 0x0c, 0x18, 0x6c, 0x00, 0x01, 0x08, 0x00, 0x08, 0x00, 0x4e,
-                            0x04,
+                            0x0c, 0x0c, 0x18, 0x6c, 0x00, 0x01, 0x08, 0x00, 0x08, 0x00, 0x4e, 0x04,
                         ]);
                         packet.extend_from_slice(&0u16.to_le_bytes());
                         packet.extend_from_slice(&[0x75, 0xc7, 0x33, 0x01]);
@@ -382,12 +380,16 @@ impl TdxHqClient {
 
     /// 从连接池借出连接并执行请求
     fn try_send_and_recv(&self, packet: &[u8]) -> Result<Vec<u8>> {
-        let server = self.last_server.lock().unwrap().clone()
+        let server = self
+            .last_server
+            .lock()
+            .unwrap()
+            .clone()
             .unwrap_or_else(|| (PRIMARY_SERVERS[0].1.to_string(), PRIMARY_SERVERS[0].2));
         let pool = self.pool.lock().unwrap();
-        let mut guard = pool.borrow(&server).map_err(|e| {
-            TdxError::Connection(format!("failed to borrow connection: {}", e))
-        })?;
+        let mut guard = pool
+            .borrow(&server)
+            .map_err(|e| TdxError::Connection(format!("failed to borrow connection: {}", e)))?;
 
         let conn = guard.conn();
 
@@ -415,9 +417,9 @@ impl TdxHqClient {
         if header.zip_size != header.unzip_size {
             let mut decoder = ZlibDecoder::new(&body_buf[..]);
             let mut decompressed = Vec::new();
-            decoder.read_to_end(&mut decompressed).map_err(|e| {
-                TdxError::ResponseParse(format!("zlib decompress failed: {}", e))
-            })?;
+            decoder
+                .read_to_end(&mut decompressed)
+                .map_err(|e| TdxError::ResponseParse(format!("zlib decompress failed: {}", e)))?;
             Ok(decompressed)
         } else {
             Ok(body_buf)
@@ -432,7 +434,10 @@ impl TdxHqClient {
 
         let last = self.last_server.lock().unwrap().clone();
         if let Some((ref ip, port)) = last {
-            if self.connect_internal(ip, port, Some(CONNECT_TIMEOUT), false).is_ok() {
+            if self
+                .connect_internal(ip, port, Some(CONNECT_TIMEOUT), false)
+                .is_ok()
+            {
                 return;
             }
         }
@@ -441,18 +446,27 @@ impl TdxHqClient {
         {
             let list = self.server_list.lock().unwrap();
             for (_, ip, port) in list.iter() {
-                if self.connect_internal(ip, *port, Some(CONNECT_TIMEOUT), false).is_ok() {
+                if self
+                    .connect_internal(ip, *port, Some(CONNECT_TIMEOUT), false)
+                    .is_ok()
+                {
                     return;
                 }
             }
         }
         for &(_, ip, port) in PRIMARY_SERVERS {
-            if self.connect_internal(ip, port, Some(CONNECT_TIMEOUT), false).is_ok() {
+            if self
+                .connect_internal(ip, port, Some(CONNECT_TIMEOUT), false)
+                .is_ok()
+            {
                 return;
             }
         }
         for &(_, ip, port) in ALL_KNOWN_SERVERS {
-            if self.connect_internal(ip, port, Some(CONNECT_TIMEOUT), false).is_ok() {
+            if self
+                .connect_internal(ip, port, Some(CONNECT_TIMEOUT), false)
+                .is_ok()
+            {
                 return;
             }
         }
@@ -487,7 +501,8 @@ impl TdxHqClient {
                     2 => FqType::Hfq,
                     _ => FqType::Qfq,
                 };
-                let context = self.fetch_context_bars_for_adjust(category, market, code, &bars, &xdxr);
+                let context =
+                    self.fetch_context_bars_for_adjust(category, market, code, &bars, &xdxr);
                 adjust_security_bars(&mut bars, &context, &xdxr, fq_enum);
             }
         }
@@ -510,7 +525,11 @@ impl TdxHqClient {
     ) -> Vec<SecurityBar> {
         utils::fetch_context_bars_for_adjust(
             |pkt| self.send_and_recv(pkt),
-            category, market, code, bars, xdxr,
+            category,
+            market,
+            code,
+            bars,
+            xdxr,
         )
     }
 
@@ -602,10 +621,7 @@ impl TdxHqClient {
     }
 
     /// 获取实时行情
-    pub fn get_security_quotes(
-        &self,
-        all_stock: &[(u8, &str)],
-    ) -> Result<Vec<SecurityQuote>> {
+    pub fn get_security_quotes(&self, all_stock: &[(u8, &str)]) -> Result<Vec<SecurityQuote>> {
         let stock_len = all_stock.len() as u16;
         let pkgdatalen = (stock_len as u32) * 7 + 12;
 
@@ -704,11 +720,7 @@ impl TdxHqClient {
     }
 
     /// 获取分时数据
-    pub fn get_minute_time_data(
-        &self,
-        market: u8,
-        code: &str,
-    ) -> Result<Vec<MinuteTimePrice>> {
+    pub fn get_minute_time_data(&self, market: u8, code: &str) -> Result<Vec<MinuteTimePrice>> {
         let code_buf = utils::code_bytes(code);
         let mut packet = Vec::with_capacity(24);
         packet.extend_from_slice(&[
@@ -834,12 +846,7 @@ impl TdxHqClient {
     }
 
     /// 获取板块数据
-    pub fn get_block_info(
-        &self,
-        block_file: &str,
-        start: u32,
-        size: u32,
-    ) -> Result<Vec<u8>> {
+    pub fn get_block_info(&self, block_file: &str, start: u32, size: u32) -> Result<Vec<u8>> {
         let mut name_buf = [0u8; 100];
         let bytes = block_file.as_bytes();
         let len = bytes.len().min(100);

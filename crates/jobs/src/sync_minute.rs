@@ -79,7 +79,9 @@ pub async fn run_sync_minute(args: SyncMinuteArgs) -> Result<()> {
 
     let start_date = compact_date(&args.start_date)?;
     let end_date = compact_date(&args.end_date)?;
-    let s3_host = args.s3_host.ok_or_else(|| anyhow!("缺少 S3 host，请在配置中提供"))?;
+    let s3_host = args
+        .s3_host
+        .ok_or_else(|| anyhow!("缺少 S3 host，请在配置中提供"))?;
 
     let api = ApiClient::new(
         args.base_url,
@@ -99,14 +101,14 @@ pub async fn run_sync_minute(args: SyncMinuteArgs) -> Result<()> {
     .await?;
 
     let s3_settings = S3Settings {
-            endpoint: s3_host,
-            bucket: args.s3_bucket,
-            access_key: args.s3_access_key,
-            secret_key: args.s3_secret_key,
-            region: args.s3_region,
-        };
-        let s3 = build_s3_client(&s3_settings).await?;
-        ensure_bucket(&s3, &s3_settings.bucket).await?;
+        endpoint: s3_host,
+        bucket: args.s3_bucket,
+        access_key: args.s3_access_key,
+        secret_key: args.s3_secret_key,
+        region: args.s3_region,
+    };
+    let s3 = build_s3_client(&s3_settings).await?;
+    ensure_bucket(&s3, &s3_settings.bucket).await?;
 
     let mut uploaded = 0usize;
     let mut rows = 0usize;
@@ -385,7 +387,8 @@ mod tests {
             minute_bar("000333.SZ", "SZ", "2026-05-24 14:59:00", 58.8),
         ];
 
-        let local_path = write_minute_partition_file_local(&staging_dir, "2026-05-24", "SZ", &bars)?;
+        let local_path =
+            write_minute_partition_file_local(&staging_dir, "2026-05-24", "SZ", &bars)?;
 
         let expected = staging_dir.join(minute_partition_key("2026-05-24", "SZ"));
         assert_eq!(local_path, expected);

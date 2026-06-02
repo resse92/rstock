@@ -671,13 +671,16 @@ pub fn parse_finance_info(body: &[u8], market: u8, code: &str) -> Result<Finance
     // Python skips: 2 bytes count + 1 byte market + 6 bytes code = 9 bytes
     // Struct: fHHII + 30*f = 136 bytes
     if body.len() < 9 + 136 {
-        return Err(TdxError::ResponseParse("body too short for finance info".into()));
+        return Err(TdxError::ResponseParse(
+            "body too short for finance info".into(),
+        ));
     }
 
     let mut pos = 9; // skip count(2) + market(1) + code(6)
 
     // f32 liutongguben — TDX 原始值 (单位不固定，由用户自行判断)
-    let liutongguben = f32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as f64;
+    let liutongguben =
+        f32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as f64;
     pos += 4;
 
     // u16 province
@@ -699,7 +702,8 @@ pub fn parse_finance_info(body: &[u8], market: u8, code: &str) -> Result<Finance
     // 30 个 f32 字段 — 全部返回 TDX 原始值，不做单位转换
     let mut fields = Vec::with_capacity(30);
     for _ in 0..30 {
-        let val = f32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as f64;
+        let val =
+            f32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as f64;
         fields.push(val);
         pos += 4;
     }
@@ -809,10 +813,26 @@ pub fn parse_xdxr_info(body: &[u8]) -> Result<Vec<XdXrInfo>> {
                 let qzgb_raw = read_u32(d, 4);
                 let phlt_raw = read_u32(d, 8);
                 let hzgb_raw = read_u32(d, 12);
-                panqianliutong = Some(if pqlt_raw == 0 { 0.0 } else { get_volume(pqlt_raw as i64) });
-                panhouliutong = Some(if phlt_raw == 0 { 0.0 } else { get_volume(phlt_raw as i64) });
-                qianzongguben = Some(if qzgb_raw == 0 { 0.0 } else { get_volume(qzgb_raw as i64) });
-                houzongguben = Some(if hzgb_raw == 0 { 0.0 } else { get_volume(hzgb_raw as i64) });
+                panqianliutong = Some(if pqlt_raw == 0 {
+                    0.0
+                } else {
+                    get_volume(pqlt_raw as i64)
+                });
+                panhouliutong = Some(if phlt_raw == 0 {
+                    0.0
+                } else {
+                    get_volume(phlt_raw as i64)
+                });
+                qianzongguben = Some(if qzgb_raw == 0 {
+                    0.0
+                } else {
+                    get_volume(qzgb_raw as i64)
+                });
+                houzongguben = Some(if hzgb_raw == 0 {
+                    0.0
+                } else {
+                    get_volume(hzgb_raw as i64)
+                });
             }
         }
         pos += 16;
@@ -865,7 +885,9 @@ pub fn parse_xdxr_info(body: &[u8]) -> Result<Vec<XdXrInfo>> {
 
 pub fn parse_block_info_meta(body: &[u8]) -> Result<BlockInfoMeta> {
     if body.len() < 38 {
-        return Err(TdxError::ResponseParse("body too short for block meta".into()));
+        return Err(TdxError::ResponseParse(
+            "body too short for block meta".into(),
+        ));
     }
 
     let size = read_u32(body, 0);
@@ -875,10 +897,7 @@ pub fn parse_block_info_meta(body: &[u8]) -> Result<BlockInfoMeta> {
     let hash_bytes = &body[5..37];
     let hash_value: String = hash_bytes.iter().map(|b| format!("{:02x}", b)).collect();
 
-    Ok(BlockInfoMeta {
-        size,
-        hash_value,
-    })
+    Ok(BlockInfoMeta { size, hash_value })
 }
 
 // ============================================================

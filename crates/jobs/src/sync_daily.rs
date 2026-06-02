@@ -121,7 +121,9 @@ pub async fn run_sync_daily(args: SyncDailyArgs) -> Result<()> {
         return Ok(());
     }
 
-    let s3_host = args.s3_host.ok_or_else(|| anyhow!("缺少 S3 host，请在配置中提供"))?;
+    let s3_host = args
+        .s3_host
+        .ok_or_else(|| anyhow!("缺少 S3 host，请在配置中提供"))?;
 
     let api = ApiClient::new(
         args.base_url,

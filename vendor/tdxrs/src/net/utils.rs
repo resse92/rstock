@@ -31,8 +31,12 @@ pub fn code_bytes(code: &str) -> [u8; 6] {
 
 /// 构建 security bars 请求包
 pub fn build_security_bars_packet(
-    category: u8, market: u8, code: &str,
-    start: u32, count: u16, fq: u8,
+    category: u8,
+    market: u8,
+    code: &str,
+    start: u32,
+    count: u16,
+    fq: u8,
 ) -> Vec<u8> {
     let code_buf = code_bytes(code);
     let mut pkt = Vec::with_capacity(38);
@@ -55,8 +59,12 @@ pub fn build_security_bars_packet(
 
 /// 构建 index bars 请求包 (与 security bars 格式相同, 语义区分)
 pub fn build_index_bars_packet(
-    category: u8, market: u8, code: &str,
-    start: u32, count: u16, fq: u8,
+    category: u8,
+    market: u8,
+    code: &str,
+    start: u32,
+    count: u16,
+    fq: u8,
 ) -> Vec<u8> {
     build_security_bars_packet(category, market, code, start, count, fq)
 }
@@ -94,7 +102,8 @@ fn read_response_raw(conn: &mut TcpConnection) -> Result<(ResponseHeader, Vec<u8
 pub fn decompress_zlib(data: &[u8]) -> Result<Vec<u8>> {
     let mut decoder = ZlibDecoder::new(data);
     let mut decompressed = Vec::new();
-    decoder.read_to_end(&mut decompressed)
+    decoder
+        .read_to_end(&mut decompressed)
         .map_err(|e| TdxError::ResponseParse(format!("zlib decompress: {}", e)))?;
     Ok(decompressed)
 }
@@ -125,7 +134,9 @@ pub fn fetch_context_bars_for_adjust<F: Fn(&[u8]) -> Result<Vec<u8>>>(
         .map(|x| x.year as u32 * 10000 + x.month as u32 * 100 + x.day as u32)
         .min();
 
-    let Some(ee_date) = earliest_event else { return Vec::new() };
+    let Some(ee_date) = earliest_event else {
+        return Vec::new();
+    };
 
     let first_bar_date =
         bars[0].year as u32 * 10000 + bars[0].month as u32 * 100 + bars[0].day as u32;
@@ -243,10 +254,7 @@ mod tests {
     fn test_fetch_context_empty_bars() {
         let bars: Vec<SecurityBar> = vec![];
         let xdxr: Vec<XdXrInfo> = vec![];
-        let ctx = fetch_context_bars_for_adjust(
-            |_| Ok(Vec::new()),
-            4, 0, "000001", &bars, &xdxr,
-        );
+        let ctx = fetch_context_bars_for_adjust(|_| Ok(Vec::new()), 4, 0, "000001", &bars, &xdxr);
         assert!(ctx.is_empty());
     }
 }

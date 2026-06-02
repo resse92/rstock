@@ -1,4 +1,6 @@
-use crate::constants::{decode_date_u16, decode_time, format_datetime, read_f32, read_u16, read_u32};
+use crate::constants::{
+    decode_date_u16, decode_time, format_datetime, read_f32, read_u16, read_u32,
+};
 use crate::error::{Result, TdxError};
 
 /// 分钟线记录 (整数格式 - TdxMinBarReader)

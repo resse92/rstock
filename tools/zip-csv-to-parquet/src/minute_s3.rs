@@ -17,8 +17,8 @@ use storage::s3::{upload_local_file, validate_parquet_file, write_parquet_bytes_
 use tokio::task::JoinSet;
 use zip::ZipArchive;
 
-use crate::config::load_minute_s3_config;
 use crate::common::{append_manifest_line, load_manifest, parse_opt_f64, source_key};
+use crate::config::load_minute_s3_config;
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
@@ -34,10 +34,7 @@ pub struct Args {
     #[arg(long, help = "并发上传 parquet part 数，默认读取 config.toml")]
     pub upload_concurrency: Option<usize>,
 
-    #[arg(
-        long,
-        help = "已完成 zip/csv 清单文件，默认读取 config.toml"
-    )]
+    #[arg(long, help = "已完成 zip/csv 清单文件，默认读取 config.toml")]
     pub manifest_file: Option<PathBuf>,
 }
 

@@ -20,8 +20,8 @@ pub fn load_minute_s3_config(path: impl AsRef<Path>) -> Result<MinuteS3Config> {
     let path = path.as_ref();
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("读取配置文件失败: {}", path.display()))?;
-    let config: RootConfig = toml::from_str(&raw)
-        .with_context(|| format!("解析 TOML 配置失败: {}", path.display()))?;
+    let config: RootConfig =
+        toml::from_str(&raw).with_context(|| format!("解析 TOML 配置失败: {}", path.display()))?;
 
     Ok(MinuteS3Config {
         host: config.s3.host,

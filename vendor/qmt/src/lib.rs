@@ -62,7 +62,9 @@ pub struct AuthInterceptor {
 }
 
 impl AuthInterceptor {
-    pub fn new(authorization: Option<impl Into<String>>) -> Result<Self, tonic::metadata::errors::InvalidMetadataValue> {
+    pub fn new(
+        authorization: Option<impl Into<String>>,
+    ) -> Result<Self, tonic::metadata::errors::InvalidMetadataValue> {
         let authorization = authorization
             .map(|value| normalize_authorization(value.into()))
             .transpose()?;
@@ -84,7 +86,8 @@ impl Interceptor for AuthInterceptor {
 pub type InterceptedChannel = InterceptedService<Channel, AuthInterceptor>;
 pub type HealthGrpcClient = health::health_client::HealthClient<InterceptedChannel>;
 pub type DataGrpcClient = data::data_service_client::DataServiceClient<InterceptedChannel>;
-pub type TradingGrpcClient = trading::trading_service_client::TradingServiceClient<InterceptedChannel>;
+pub type TradingGrpcClient =
+    trading::trading_service_client::TradingServiceClient<InterceptedChannel>;
 
 #[derive(Debug, Clone)]
 pub struct QmtClient {

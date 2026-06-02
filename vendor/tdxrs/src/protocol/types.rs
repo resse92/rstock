@@ -252,10 +252,10 @@ pub fn get_security_type(market: u8, code: &str) -> u8 {
 pub fn get_security_coefficient(market: u8, code: &str) -> f64 {
     let sec_type = get_security_type(market, code);
     match sec_type {
-        0 => 0.01,  // 指数
-        1 => 0.01,  // A股
-        2 => 0.001, // B股
-        3 => 0.001, // 基金
+        0 => 0.01,   // 指数
+        1 => 0.01,   // A股
+        2 => 0.001,  // B股
+        3 => 0.001,  // 基金
         4 => 0.0001, // 债券
         _ => 0.01,
     }

@@ -2,11 +2,16 @@
 bind = "0.0.0.0:8080"
 daily_cron = "0 30 15 * * *"
 minute_cron = "0 10 15 * * *"
+quote_forwarder_enabled = true
 
 [qmt]
 host = "http://127.0.0.1:40002"
 authorization = ""
 timeout = 30
+
+[nats]
+url = "nats://127.0.0.1:4222"
+token = ""
 
 [s3]
 host = "127.0.0.1:9000"

@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod errors;
 mod patterns;
+mod whole_quote;
 
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -22,6 +23,9 @@ pub use self::config::ServerConfig;
 use self::errors::{ok, ApiError, ApiResponse};
 use self::patterns::{
     check_all_patterns, check_single_pattern, list_patterns, scan_market_by_pattern,
+};
+use self::whole_quote::{
+    start_whole_quote_forwarder, stop_whole_quote_forwarder, whole_quote_forwarder_status,
 };
 use jobs::sync_daily::{run_sync_daily, SyncDailyArgs};
 use jobs::sync_minute::{run_sync_minute, SyncMinuteArgs};
@@ -52,6 +56,18 @@ pub async fn run_server(args: ServerConfig) -> Result<()> {
         .route("/api/v1/patterns/check-all", post(check_all_patterns))
         .route("/api/v1/patterns/list", get(list_patterns))
         .route("/api/v1/patterns/scan-market", post(scan_market_by_pattern))
+        .route(
+            "/api/v1/qmt/whole-quote/start",
+            post(start_whole_quote_forwarder),
+        )
+        .route(
+            "/api/v1/qmt/whole-quote/stop",
+            post(stop_whole_quote_forwarder),
+        )
+        .route(
+            "/api/v1/qmt/whole-quote/status",
+            get(whole_quote_forwarder_status),
+        )
         .with_state(state.clone());
 
     let listener = TcpListener::bind(state.args.bind)

@@ -10,6 +10,7 @@ pub struct ServerConfig {
     pub bind: SocketAddr,
     pub daily_cron: String,
     pub minute_cron: String,
+    pub quote_forwarder_enabled: bool,
     pub daily_chunk_size: usize,
     pub minute_chunk_size: usize,
     pub daily_fetch_concurrency: usize,
@@ -19,6 +20,8 @@ pub struct ServerConfig {
     pub base_url: String,
     pub authorization: Option<String>,
     pub timeout: u64,
+    pub nats_url: String,
+    pub nats_token: Option<String>,
     pub s3_bucket: String,
     pub staging_dir: PathBuf,
     pub s3_region: String,
@@ -41,6 +44,7 @@ impl ServerConfig {
             bind: config.server.bind.parse().context("server.bind 格式错误")?,
             daily_cron: config.server.daily_cron,
             minute_cron: config.server.minute_cron,
+            quote_forwarder_enabled: config.server.quote_forwarder_enabled,
             daily_chunk_size: config.sync.daily.chunk_size,
             minute_chunk_size: config.sync.minute.chunk_size,
             daily_fetch_concurrency: config.sync.daily.fetch_concurrency,
@@ -50,6 +54,8 @@ impl ServerConfig {
             base_url: config.qmt.host,
             authorization: config.qmt.authorization,
             timeout: config.qmt.timeout,
+            nats_url: config.nats.url,
+            nats_token: empty_to_none(config.nats.token),
             s3_bucket: config.s3.bucket,
             staging_dir: config.s3.local_staging_dir,
             s3_region: config.s3.region,
@@ -80,6 +86,8 @@ struct RootConfig {
     #[serde(default)]
     qmt: QmtSection,
     #[serde(default)]
+    nats: NatsSection,
+    #[serde(default)]
     s3: S3Section,
     #[serde(default)]
     sync: SyncSection,
@@ -95,6 +103,8 @@ struct ServerSection {
     daily_cron: String,
     #[serde(default = "default_minute_cron")]
     minute_cron: String,
+    #[serde(default = "default_quote_forwarder_enabled")]
+    quote_forwarder_enabled: bool,
 }
 
 impl Default for ServerSection {
@@ -103,6 +113,7 @@ impl Default for ServerSection {
             bind: default_bind(),
             daily_cron: default_daily_cron(),
             minute_cron: default_minute_cron(),
+            quote_forwarder_enabled: default_quote_forwarder_enabled(),
         }
     }
 }
@@ -122,6 +133,22 @@ impl Default for QmtSection {
             host: default_qmt_host(),
             authorization: None,
             timeout: default_qmt_timeout(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct NatsSection {
+    #[serde(default = "default_nats_url")]
+    url: String,
+    token: Option<String>,
+}
+
+impl Default for NatsSection {
+    fn default() -> Self {
+        Self {
+            url: default_nats_url(),
+            token: None,
         }
     }
 }
@@ -237,12 +264,20 @@ fn default_minute_cron() -> String {
     "0 10 15 * * *".to_string()
 }
 
+fn default_quote_forwarder_enabled() -> bool {
+    true
+}
+
 fn default_qmt_host() -> String {
     DEFAULT_QMT_API_HOST.to_string()
 }
 
 fn default_qmt_timeout() -> u64 {
     30
+}
+
+fn default_nats_url() -> String {
+    "nats://127.0.0.1:4222".to_string()
 }
 
 fn default_s3_host() -> String {

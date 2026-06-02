@@ -12,8 +12,7 @@ use jobs::patterns::detectors::{
     WBottomDetector,
 };
 use jobs::patterns::{
-    PatternCacheConfig, PatternDataSourceConfig, PatternScanReport, PatternScanRequest,
-    PatternScanner, PatternSignal,
+    PatternDataSourceConfig, PatternScanReport, PatternScanRequest, PatternScanner, PatternSignal,
 };
 use jobs::utils::load_stock_codes_from_file;
 use serde::{Deserialize, Serialize};
@@ -61,6 +60,7 @@ pub struct PatternSingleResponse {
 pub struct PatternAllResponse {
     pub symbol: String,
     pub trade_date: String,
+    pub skipped_short_series: usize,
     pub signal_count: usize,
     pub signals: Vec<PatternSignal>,
 }
@@ -69,9 +69,11 @@ pub struct PatternAllResponse {
 pub struct PatternMarketResponse {
     pub pattern_id: String,
     pub trade_date: String,
+    pub requested_symbols: usize,
     pub series_count: usize,
+    pub skipped_short_series: usize,
     pub signal_count: usize,
-    pub refreshed_symbols: usize,
+    pub fetched_symbols: usize,
     pub signals: Vec<PatternSignal>,
 }
 
@@ -150,6 +152,7 @@ pub async fn check_all_patterns(
     Ok(Json(PatternAllResponse {
         symbol: req.symbol,
         trade_date: trade_date.format("%Y-%m-%d").to_string(),
+        skipped_short_series: report.skipped_short_series,
         signal_count: report.signal_count,
         signals: report.signals,
     }))
@@ -192,9 +195,11 @@ pub async fn scan_market_by_pattern(
     Ok(Json(PatternMarketResponse {
         pattern_id: req.pattern_id,
         trade_date: trade_date.format("%Y-%m-%d").to_string(),
+        requested_symbols: report.requested_symbols,
         series_count: report.series_count,
+        skipped_short_series: report.skipped_short_series,
         signal_count: report.signal_count,
-        refreshed_symbols: report.refreshed_symbols.len(),
+        fetched_symbols: report.fetched_symbols.len(),
         signals: report.signals,
     }))
 }
@@ -203,18 +208,14 @@ fn build_scanner(
     state: &AppState,
     detectors: Vec<Box<dyn PatternDetector>>,
 ) -> Result<PatternScanner> {
-    let cache = PatternCacheConfig {
-        db_path: state.args.pattern_cache_db_path.clone(),
-        retention_days: state.args.pattern_cache_retention_days,
-        max_bars: state.args.pattern_cache_max_bars,
-    };
     let mut data_source = PatternDataSourceConfig::new(state.args.base_url.clone());
     data_source.authorization = state.args.authorization.clone();
     data_source.timeout_secs = state.args.timeout;
     data_source.adjust_type = state.args.pattern_adjust_type.clone();
     data_source.tdx_fallback = state.args.pattern_tdx_fallback;
     data_source.batch_size = state.args.daily_chunk_size.max(1);
-    PatternScanner::new(cache, data_source, detectors)
+    data_source.fetch_concurrency = state.args.daily_fetch_concurrency.max(1);
+    PatternScanner::new(data_source, detectors)
 }
 
 async fn run_scan(

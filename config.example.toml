@@ -28,11 +28,6 @@ fetch_concurrency = 4
 adjust_type = "qfq"
 tdx_fallback = true
 
-[patterns.cache]
-db_path = "data/cache/patterns.duckdb"
-retention_days = 540
-max_bars = 3000000
-
 [tools.minute_s3]
 part_size = 200000
 upload_concurrency = 4

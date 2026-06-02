@@ -1,28 +1,9 @@
-use std::path::PathBuf;
-
 use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::models::DailyBar;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PatternCacheConfig {
-    pub db_path: PathBuf,
-    pub retention_days: i64,
-    pub max_bars: usize,
-}
-
-impl Default for PatternCacheConfig {
-    fn default() -> Self {
-        Self {
-            db_path: PathBuf::from("data/cache/patterns.duckdb"),
-            retention_days: 540,
-            max_bars: 3_000_000,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bar {
@@ -137,8 +118,10 @@ pub struct PatternScanRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PatternScanReport {
+    pub requested_symbols: usize,
+    pub skipped_short_series: usize,
     pub series_count: usize,
     pub signal_count: usize,
-    pub refreshed_symbols: Vec<String>,
+    pub fetched_symbols: Vec<String>,
     pub signals: Vec<PatternSignal>,
 }

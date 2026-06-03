@@ -89,6 +89,8 @@ pub type DataGrpcClient = data::data_service_client::DataServiceClient<Intercept
 pub type TradingGrpcClient =
     trading::trading_service_client::TradingServiceClient<InterceptedChannel>;
 
+const DEFAULT_MAX_DECODING_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct QmtClient {
     channel: Channel,
@@ -164,6 +166,7 @@ impl QmtClient {
             self.channel.clone(),
             self.interceptor.clone(),
         )
+        .max_decoding_message_size(DEFAULT_MAX_DECODING_MESSAGE_SIZE)
     }
 
     pub fn data(&self) -> DataGrpcClient {
@@ -171,6 +174,7 @@ impl QmtClient {
             self.channel.clone(),
             self.interceptor.clone(),
         )
+        .max_decoding_message_size(DEFAULT_MAX_DECODING_MESSAGE_SIZE)
     }
 
     pub fn trading(&self) -> TradingGrpcClient {
@@ -178,6 +182,7 @@ impl QmtClient {
             self.channel.clone(),
             self.interceptor.clone(),
         )
+        .max_decoding_message_size(DEFAULT_MAX_DECODING_MESSAGE_SIZE)
     }
 }
 

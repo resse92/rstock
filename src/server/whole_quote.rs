@@ -1,40 +1,46 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use async_nats::ConnectOptions;
 use axum::extract::State;
 use axum::Json;
-use futures_util::StreamExt;
-use qmt::data::{QuoteEvent, WholeQuoteStreamRequest};
+use futures_util::future::try_join_all;
+use qmt::common::Status as QmtStatus;
+use qmt::data::{FullTickSnapshot, FullTickSnapshotRequest, StockListInSectorRequest};
 use qmt::QmtClient;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::task::JoinHandle;
+use tokio::time::MissedTickBehavior;
 use tonic::transport::Endpoint;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use super::app::AppState;
 use super::errors::{ok, ApiError, ApiResponse};
 
-const DEFAULT_MARKETS: &[&str] = &["SH", "SZ"];
-const DEFAULT_RETRY_SECS: u64 = 3;
+const DEFAULT_SECTOR_NAME: &str = "沪深A股";
+const SNAPSHOT_INTERVAL_SECS: u64 = 10;
+const SNAPSHOT_WORKER_COUNT: usize = 10;
 
 #[derive(Default)]
 pub struct WholeQuoteSubscription {
     handle: Option<JoinHandle<()>>,
-    markets: Vec<String>,
+    sector_name: Option<String>,
+    symbols: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct WholeQuoteStartRequest {
-    pub markets: Option<Vec<String>>,
+    pub sector_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct WholeQuoteStatusResponse {
     pub enabled: bool,
     pub running: bool,
-    pub markets: Vec<String>,
+    pub sector_name: Option<String>,
+    pub symbol_count: usize,
+    pub snapshot_worker_count: usize,
     pub nats_url: String,
     pub token_configured: bool,
     pub mode: &'static str,
@@ -49,26 +55,30 @@ pub async fn start_whole_quote_forwarder(
         return Err(ApiError(anyhow!("whole quote forwarder is disabled by config")));
     }
 
-    let markets = normalize_markets(req.and_then(|Json(body)| body.markets))?;
+    let sector_name = normalize_sector_name(req.and_then(|Json(body)| body.sector_name));
+    let client = build_qmt_client(&state)?;
+    let symbols = discover_symbols_by_sector(&client, &sector_name).await?;
     let mut subscription = state.whole_quote.lock().await;
     if subscription.is_running() {
         return Err(ApiError(anyhow!(
-            "whole quote forwarder already running: markets={}",
-            subscription.markets.join(",")
+            "whole quote forwarder already running: sector_name={}",
+            subscription.sector_name.as_deref().unwrap_or_default()
         )));
     }
 
     let task_state = state.clone();
-    let task_markets = markets.clone();
+    let task_symbols = symbols.clone();
     let handle = tokio::spawn(async move {
-        run_forwarder_loop(task_state, task_markets).await;
+        run_forwarder_loop(task_state, task_symbols).await;
     });
 
     subscription.handle = Some(handle);
-    subscription.markets = markets.clone();
+    subscription.sector_name = Some(sector_name.clone());
+    subscription.symbols = symbols.clone();
     info!(
         target: "rstock::whole_quote",
-        markets = %markets.join(","),
+        sector_name = %sector_name,
+        symbol_count = symbols.len(),
         "whole quote forwarder started"
     );
     Ok(Json(ok("whole quote forwarder started")))
@@ -83,7 +93,8 @@ pub async fn stop_whole_quote_forwarder(
     };
 
     handle.abort();
-    subscription.markets.clear();
+    subscription.sector_name = None;
+    subscription.symbols.clear();
     info!(target: "rstock::whole_quote", "whole quote forwarder stopped");
     Ok(Json(ok("whole quote forwarder stopped")))
 }
@@ -95,7 +106,9 @@ pub async fn whole_quote_forwarder_status(
     Json(WholeQuoteStatusResponse {
         enabled: state.args.quote_forwarder_enabled,
         running: subscription.is_running(),
-        markets: subscription.markets.clone(),
+        sector_name: subscription.sector_name.clone(),
+        symbol_count: subscription.symbols.len(),
+        snapshot_worker_count: SNAPSHOT_WORKER_COUNT,
         nats_url: state.args.nats_url.clone(),
         token_configured: state.args.nats_token.is_some(),
         mode: "core",
@@ -112,52 +125,144 @@ impl WholeQuoteSubscription {
     }
 }
 
-async fn run_forwarder_loop(state: AppState, markets: Vec<String>) {
-    loop {
-        match run_forwarder_once(&state, &markets).await {
-            Ok(()) => warn!(
+async fn run_forwarder_loop(state: AppState, symbols: Vec<String>) {
+    let mut nats = None;
+    let client = match build_qmt_client(&state) {
+        Ok(client) => client,
+        Err(err) => {
+            error!(
                 target: "rstock::whole_quote",
-                markets = %markets.join(","),
-                "whole quote stream ended, retrying"
-            ),
+                error = ?err,
+                symbol_count = symbols.len(),
+                "build qmt client failed"
+            );
+            return;
+        }
+    };
+    let mut interval = tokio::time::interval(Duration::from_secs(SNAPSHOT_INTERVAL_SECS));
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        if nats.is_none() {
+            match connect_nats(&state).await {
+                Ok(client) => {
+                    nats = Some(client);
+                }
+                Err(err) => {
+                    error!(
+                        target: "rstock::whole_quote",
+                        error = ?err,
+                        symbol_count = symbols.len(),
+                        "connect nats failed"
+                    );
+                    continue;
+                }
+            }
+        }
+
+        match run_forwarder_once(&state, &client, nats.as_ref().expect("nats connected"), &symbols)
+            .await
+        {
+            Ok(()) => {}
             Err(err) => error!(
                 target: "rstock::whole_quote",
                 error = ?err,
-                markets = %markets.join(","),
+                symbol_count = symbols.len(),
                 "whole quote forwarder failed"
             ),
         }
-        tokio::time::sleep(Duration::from_secs(DEFAULT_RETRY_SECS)).await;
+        if let Some(client) = &nats {
+            if !matches!(
+                client.connection_state(),
+                async_nats::connection::State::Connected
+            ) {
+                nats = None;
+            }
+        }
     }
 }
 
-async fn run_forwarder_once(state: &AppState, markets: &[String]) -> Result<()> {
-    let client = build_qmt_client(state)?;
-    let nats = connect_nats(state).await?;
-    let mut stream = client
-        .data()
-        .stream_whole_quote(WholeQuoteStreamRequest {
-            markets: markets.to_vec(),
-        })
-        .await
-        .context("subscribe whole quote failed")?
-        .into_inner();
+async fn run_forwarder_once(
+    state: &AppState,
+    client: &QmtClient,
+    nats: &async_nats::Client,
+    symbols: &[String],
+) -> Result<()> {
+    let cycle_started_at = Instant::now();
+    let symbol_batches = split_symbols_into_workers(symbols, SNAPSHOT_WORKER_COUNT);
+    let snapshot_started_at = Instant::now();
+    let responses = try_join_all(symbol_batches.iter().enumerate().map(|(index, batch)| {
+        fetch_full_tick_snapshot_batch(client.clone(), index + 1, batch.clone())
+    }))
+    .await?;
+    let snapshot_elapsed = snapshot_started_at.elapsed();
+    let publish_started_at = Instant::now();
+    let snapshot_count = responses.iter().map(|snapshots| snapshots.len()).sum::<usize>();
+    let mut published_count = 0usize;
+    let batch_count = symbol_batches.len();
 
     info!(
         target: "rstock::whole_quote",
-        markets = %markets.join(","),
+        symbol_count = symbols.len(),
+        batch_count,
         nats_url = %state.args.nats_url,
-        "whole quote stream connected"
+        snapshot_ms = snapshot_elapsed.as_millis(),
+        snapshot_count,
+        "full tick snapshot fetched"
     );
 
-    while let Some(item) = stream.next().await {
-        let event = item.context("receive whole quote event failed")?;
-        if let Some((subject, payload)) = build_tick_message(event)? {
-            publish_tick(&nats, &subject, payload).await?;
+    for snapshots in responses {
+        for snapshot in snapshots {
+            if let Some((subject, payload)) = build_snapshot_message(snapshot)? {
+                publish_tick(&nats, &subject, payload).await?;
+                published_count += 1;
+            }
         }
     }
 
+    let publish_elapsed = publish_started_at.elapsed();
+    let cycle_elapsed = cycle_started_at.elapsed();
+    info!(
+        target: "rstock::whole_quote",
+        symbol_count = symbols.len(),
+        batch_count,
+        snapshot_count,
+        published_count,
+        snapshot_ms = snapshot_elapsed.as_millis(),
+        publish_ms = publish_elapsed.as_millis(),
+        cycle_ms = cycle_elapsed.as_millis(),
+        "full tick snapshot cycle completed"
+    );
+
     Ok(())
+}
+
+async fn fetch_full_tick_snapshot_batch(
+    client: QmtClient,
+    worker_id: usize,
+    symbols: Vec<String>,
+) -> Result<Vec<FullTickSnapshot>> {
+    let started_at = Instant::now();
+    let response = client
+        .data()
+        .get_full_tick_snapshot(FullTickSnapshotRequest {
+            symbols: symbols.clone(),
+        })
+        .await
+        .with_context(|| format!("get full tick snapshot failed for worker {worker_id}"))?
+        .into_inner();
+    ensure_status_ok(response.status.as_ref(), "GetFullTickSnapshot")?;
+    let elapsed = started_at.elapsed();
+    let snapshot_count = response.snapshots.len();
+    info!(
+        target: "rstock::whole_quote",
+        worker_id,
+        symbol_count = symbols.len(),
+        snapshot_count,
+        snapshot_ms = elapsed.as_millis(),
+        "full tick snapshot batch fetched"
+    );
+    Ok(response.snapshots)
 }
 
 async fn connect_nats(state: &AppState) -> Result<async_nats::Client> {
@@ -190,23 +295,16 @@ async fn publish_tick(
     Ok(())
 }
 
-fn build_tick_message(event: QuoteEvent) -> Result<Option<(String, Vec<u8>)>> {
-    let Some(payload) = event.payload else {
+fn build_snapshot_message(snapshot: FullTickSnapshot) -> Result<Option<(String, Vec<u8>)>> {
+    let Some(tick) = snapshot.tick else {
         return Ok(None);
     };
-    let qmt::data::quote_event::Payload::Tick(tick) = payload else {
-        return Ok(None);
-    };
-
-    let (code, market) = split_symbol(&event.symbol)
-        .ok_or_else(|| anyhow!("unsupported symbol format: {}", event.symbol))?;
+    let (code, market) = split_symbol(&snapshot.symbol)
+        .ok_or_else(|| anyhow!("unsupported symbol format: {}", snapshot.symbol))?;
     let subject = format!("stock.tick.{code}.{market}");
+    let full_code = format!("{code}.{market}");
     let payload = json!({
-        "symbol": event.symbol,
-        "code": code,
-        "market": market,
-        "period": event.period,
-        "event_time_ms": event.event_time_ms,
+        "code": full_code,
         "tick": {
             "time_ms": tick.time_ms,
             "last_price": tick.last_price,
@@ -230,18 +328,70 @@ fn build_tick_message(event: QuoteEvent) -> Result<Option<(String, Vec<u8>)>> {
     Ok(Some((subject, serde_json::to_vec(&payload)?)))
 }
 
-fn normalize_markets(markets: Option<Vec<String>>) -> Result<Vec<String>> {
-    let markets = markets
-        .unwrap_or_else(|| DEFAULT_MARKETS.iter().map(|item| item.to_string()).collect());
-    let normalized = markets
+async fn discover_symbols_by_sector(client: &QmtClient, sector_name: &str) -> Result<Vec<String>> {
+    let grpc_started_at = Instant::now();
+    let response = client
+        .data()
+        .get_stock_list_in_sector(StockListInSectorRequest {
+            sector_name: sector_name.to_string(),
+        })
+        .await
+        .with_context(|| format!("get stock list in sector failed: {sector_name}"))?
+        .into_inner();
+    ensure_status_ok(response.status.as_ref(), "GetStockListInSector")?;
+    let grpc_elapsed = grpc_started_at.elapsed();
+    let extract_started_at = Instant::now();
+    let symbols = response
+        .sector
+        .map(|sector| sector.symbols)
+        .unwrap_or_default()
         .into_iter()
-        .map(|item| item.trim().to_ascii_uppercase())
-        .filter(|item| !item.is_empty())
+        .map(|symbol| symbol.trim().to_string())
+        .filter(|symbol| !symbol.is_empty())
         .collect::<Vec<_>>();
-    if normalized.is_empty() {
-        return Err(anyhow!("markets cannot be empty"));
+    let extract_elapsed = extract_started_at.elapsed();
+    if symbols.is_empty() {
+        return Err(anyhow!("sector returned no symbols: {sector_name}"));
     }
-    Ok(normalized)
+    info!(
+        target: "rstock::whole_quote",
+        sector_name = %sector_name,
+        symbol_count = symbols.len(),
+        get_stock_list_in_sector_ms = grpc_elapsed.as_millis(),
+        extract_symbols_ms = extract_elapsed.as_millis(),
+        "resolved symbols by sector"
+    );
+    Ok(symbols)
+}
+
+fn split_symbols_into_workers(symbols: &[String], worker_count: usize) -> Vec<Vec<String>> {
+    if symbols.is_empty() {
+        return Vec::new();
+    }
+    let batch_size = symbols.len().div_ceil(worker_count.max(1));
+    symbols
+        .chunks(batch_size.max(1))
+        .map(|chunk| chunk.to_vec())
+        .collect()
+}
+
+fn normalize_sector_name(sector_name: Option<String>) -> String {
+    sector_name
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_SECTOR_NAME.to_string())
+}
+
+fn ensure_status_ok(status: Option<&QmtStatus>, action: &str) -> Result<()> {
+    match status {
+        None => Ok(()),
+        Some(status) if status.code == 0 => Ok(()),
+        Some(status) => Err(anyhow!(
+            "{action} failed: code={}, message={}",
+            status.code,
+            status.message
+        )),
+    }
 }
 
 fn split_symbol(symbol: &str) -> Option<(String, String)> {

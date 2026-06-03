@@ -48,12 +48,14 @@ pub fn build_security_bars_packet(
     pkt.extend_from_slice(&(market as u16).to_le_bytes());
     pkt.extend_from_slice(&code_buf);
     pkt.extend_from_slice(&(category as u16).to_le_bytes());
-    pkt.extend_from_slice(&(fq as u16).to_le_bytes());
+    // Request layout must match TDX/GetSecurityBars exactly:
+    // market, code, category, times, start, count, adjust, reserved[8].
+    pkt.extend_from_slice(&1u16.to_le_bytes());
     pkt.extend_from_slice(&(start as u16).to_le_bytes());
     pkt.extend_from_slice(&count.to_le_bytes());
+    pkt.extend_from_slice(&(fq as u16).to_le_bytes());
     pkt.extend_from_slice(&0u32.to_le_bytes());
     pkt.extend_from_slice(&0u32.to_le_bytes());
-    pkt.extend_from_slice(&0u16.to_le_bytes());
     pkt
 }
 
@@ -224,8 +226,14 @@ mod tests {
         assert_eq!(&pkt[14..20], b"600519");
         // category at pos 20-21
         assert_eq!(u16::from_le_bytes([pkt[20], pkt[21]]), 4);
-        // fq at pos 22-23
+        // times at pos 22-23
         assert_eq!(u16::from_le_bytes([pkt[22], pkt[23]]), 1);
+        // start at pos 24-25
+        assert_eq!(u16::from_le_bytes([pkt[24], pkt[25]]), 0);
+        // count at pos 26-27
+        assert_eq!(u16::from_le_bytes([pkt[26], pkt[27]]), 800);
+        // adjust/fq at pos 28-29
+        assert_eq!(u16::from_le_bytes([pkt[28], pkt[29]]), 1);
     }
 
     #[test]

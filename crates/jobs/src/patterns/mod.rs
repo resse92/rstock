@@ -12,4 +12,4 @@ pub use detectors::{
     WBottomDetector,
 };
 pub use model::{Bar, BarSeries, PatternScanReport, PatternScanRequest, PatternSignal};
-pub use runner::{PatternDataSourceConfig, PatternScanner};
+pub use runner::{PatternDataSourceConfig, PatternScanProgress, PatternScanner};

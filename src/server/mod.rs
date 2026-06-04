@@ -22,7 +22,8 @@ use self::app::AppState;
 pub use self::config::ServerConfig;
 use self::errors::{ok, ApiError, ApiResponse};
 use self::patterns::{
-    check_all_patterns, check_single_pattern, list_patterns, scan_market_by_pattern,
+    check_all_patterns, check_single_pattern, get_market_scan_job, list_patterns,
+    scan_market_by_pattern,
 };
 use self::whole_quote::{
     start_whole_quote_forwarder, stop_whole_quote_forwarder, whole_quote_forwarder_status,
@@ -56,6 +57,7 @@ pub async fn run_server(args: ServerConfig) -> Result<()> {
         .route("/api/v1/patterns/check-all", post(check_all_patterns))
         .route("/api/v1/patterns/list", get(list_patterns))
         .route("/api/v1/patterns/scan-market", post(scan_market_by_pattern))
+        .route("/api/v1/patterns/scan-market/{job_id}", get(get_market_scan_job))
         .route(
             "/api/v1/qmt/whole-quote/start",
             post(start_whole_quote_forwarder),

@@ -52,7 +52,7 @@ pub async fn start_whole_quote_forwarder(
     req: Option<Json<WholeQuoteStartRequest>>,
 ) -> Result<Json<ApiResponse>, ApiError> {
     if !state.args.quote_forwarder_enabled {
-        return Err(ApiError(anyhow!("whole quote forwarder is disabled by config")));
+        return Err(ApiError::from(anyhow!("whole quote forwarder is disabled by config")));
     }
 
     let sector_name = normalize_sector_name(req.and_then(|Json(body)| body.sector_name));
@@ -60,7 +60,7 @@ pub async fn start_whole_quote_forwarder(
     let symbols = discover_symbols_by_sector(&client, &sector_name).await?;
     let mut subscription = state.whole_quote.lock().await;
     if subscription.is_running() {
-        return Err(ApiError(anyhow!(
+        return Err(ApiError::from(anyhow!(
             "whole quote forwarder already running: sector_name={}",
             subscription.sector_name.as_deref().unwrap_or_default()
         )));
@@ -89,7 +89,7 @@ pub async fn stop_whole_quote_forwarder(
 ) -> Result<Json<ApiResponse>, ApiError> {
     let mut subscription = state.whole_quote.lock().await;
     let Some(handle) = subscription.handle.take() else {
-        return Err(ApiError(anyhow!("whole quote forwarder is not running")));
+        return Err(ApiError::from(anyhow!("whole quote forwarder is not running")));
     };
 
     handle.abort();

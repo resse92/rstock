@@ -8,14 +8,30 @@ pub struct ApiResponse {
     pub message: String,
 }
 
-pub struct ApiError(pub anyhow::Error);
+pub struct ApiError {
+    status: StatusCode,
+    error: anyhow::Error,
+}
+
+impl ApiError {
+    pub fn new(status: StatusCode, error: impl Into<anyhow::Error>) -> Self {
+        Self {
+            status,
+            error: error.into(),
+        }
+    }
+
+    pub fn not_found(error: impl Into<anyhow::Error>) -> Self {
+        Self::new(StatusCode::NOT_FOUND, error)
+    }
+}
 
 impl<E> From<E> for ApiError
 where
     E: Into<anyhow::Error>,
 {
     fn from(err: E) -> Self {
-        Self(err.into())
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, err)
     }
 }
 
@@ -23,9 +39,9 @@ impl axum::response::IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let body = Json(ApiResponse {
             ok: false,
-            message: format!("{:#}", self.0),
+            message: format!("{:#}", self.error),
         });
-        (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
+        (self.status, body).into_response()
     }
 }
 

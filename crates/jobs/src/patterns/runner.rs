@@ -46,6 +46,15 @@ pub struct PatternScanner {
     data_source: PatternDataSourceConfig,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct PatternScanProgress {
+    pub requested_symbols: usize,
+    pub completed_symbols: usize,
+    pub series_count: usize,
+    pub skipped_short_series: usize,
+    pub signal_count: usize,
+}
+
 impl PatternScanner {
     pub fn new(
         data_source: PatternDataSourceConfig,
@@ -58,6 +67,17 @@ impl PatternScanner {
     }
 
     pub async fn scan(&self, request: PatternScanRequest) -> Result<PatternScanReport> {
+        self.scan_with_progress(request, |_| {}).await
+    }
+
+    pub async fn scan_with_progress<F>(
+        &self,
+        request: PatternScanRequest,
+        mut on_progress: F,
+    ) -> Result<PatternScanReport>
+    where
+        F: FnMut(PatternScanProgress) + Send,
+    {
         if request.symbols.is_empty() {
             return Err(anyhow!("pattern scan request symbols is empty"));
         }
@@ -80,6 +100,8 @@ impl PatternScanner {
         let mut skipped_short_series = 0usize;
         let mut fetched_symbols = Vec::<String>::new();
         let mut signals = Vec::<PatternSignal>::new();
+        let requested_symbols = request.symbols.len();
+        let mut completed_symbols = 0usize;
 
         while next_symbol_idx < request.symbols.len() || !join_set.is_empty() {
             while next_symbol_idx < request.symbols.len() && join_set.len() < fetch_concurrency {
@@ -103,6 +125,7 @@ impl PatternScanner {
 
             if let Some(result) = join_set.join_next().await {
                 let result = result.context("pattern symbol worker join failed")??;
+                completed_symbols += 1;
                 if result.had_series {
                     series_count += 1;
                     fetched_symbols.push(result.symbol.clone());
@@ -111,6 +134,13 @@ impl PatternScanner {
                     skipped_short_series += 1;
                 }
                 signals.extend(result.signals);
+                on_progress(PatternScanProgress {
+                    requested_symbols,
+                    completed_symbols,
+                    series_count,
+                    skipped_short_series,
+                    signal_count: signals.len(),
+                });
             }
         }
 
@@ -124,7 +154,7 @@ impl PatternScanner {
             "pattern scan done"
         );
         Ok(PatternScanReport {
-            requested_symbols: request.symbols.len(),
+            requested_symbols,
             skipped_short_series,
             series_count,
             signal_count: signals.len(),

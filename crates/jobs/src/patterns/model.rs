@@ -187,6 +187,12 @@ pub struct PatternSignal {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PatternScanFailure {
+    pub symbol: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PatternScanRequest {
     pub symbols: Vec<String>,
     pub start_date: NaiveDate,
@@ -201,5 +207,6 @@ pub struct PatternScanReport {
     pub series_count: usize,
     pub signal_count: usize,
     pub fetched_symbols: Vec<String>,
+    pub failed_symbols: Vec<PatternScanFailure>,
     pub signals: Vec<PatternSignal>,
 }

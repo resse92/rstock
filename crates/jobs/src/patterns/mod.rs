@@ -11,5 +11,7 @@ pub use detectors::{
     TrendAccelerationInflectionDetector, TrendResonanceReversalDetector, TrendStartDetector,
     WBottomDetector,
 };
-pub use model::{Bar, BarSeries, PatternScanReport, PatternScanRequest, PatternSignal};
+pub use model::{
+    Bar, BarSeries, PatternScanFailure, PatternScanReport, PatternScanRequest, PatternSignal,
+};
 pub use runner::{PatternDataSourceConfig, PatternScanProgress, PatternScanner};

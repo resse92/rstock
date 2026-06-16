@@ -12,8 +12,8 @@ use jobs::patterns::detectors::{
     WBottomDetector,
 };
 use jobs::patterns::{
-    PatternDataSourceConfig, PatternScanProgress, PatternScanReport, PatternScanRequest,
-    PatternScanner, PatternSignal,
+    PatternDataSourceConfig, PatternScanFailure, PatternScanProgress, PatternScanReport,
+    PatternScanRequest, PatternScanner, PatternSignal,
 };
 use jobs::utils::load_stock_codes_from_file;
 use serde::{Deserialize, Serialize};
@@ -54,6 +54,7 @@ pub struct PatternSingleResponse {
     pub trade_date: String,
     pub pattern_id: String,
     pub matched: bool,
+    pub failed_symbols: Vec<PatternScanFailure>,
     pub signal: Option<PatternSignal>,
 }
 
@@ -63,6 +64,7 @@ pub struct PatternAllResponse {
     pub trade_date: String,
     pub skipped_short_series: usize,
     pub signal_count: usize,
+    pub failed_symbols: Vec<PatternScanFailure>,
     pub signals: Vec<PatternSignal>,
 }
 
@@ -75,6 +77,7 @@ pub struct PatternMarketResponse {
     pub skipped_short_series: usize,
     pub signal_count: usize,
     pub fetched_symbols: usize,
+    pub failed_symbols: Vec<PatternScanFailure>,
     pub signals: Vec<PatternSignal>,
 }
 
@@ -98,6 +101,7 @@ pub struct PatternMarketJobResponse {
     pub series_count: usize,
     pub skipped_short_series: usize,
     pub signal_count: usize,
+    pub failed_symbols: Vec<PatternScanFailure>,
     pub error: Option<String>,
     pub created_at: String,
     pub started_at: Option<String>,
@@ -150,6 +154,7 @@ pub async fn check_single_pattern(
         trade_date: trade_date.format("%Y-%m-%d").to_string(),
         pattern_id: req.pattern_id,
         matched: signal.is_some(),
+        failed_symbols: report.failed_symbols,
         signal,
     }))
 }
@@ -182,6 +187,7 @@ pub async fn check_all_patterns(
         trade_date: trade_date.format("%Y-%m-%d").to_string(),
         skipped_short_series: report.skipped_short_series,
         signal_count: report.signal_count,
+        failed_symbols: report.failed_symbols,
         signals: report.signals,
     }))
 }
@@ -224,6 +230,7 @@ pub async fn scan_market_by_pattern(
                 series_count: 0,
                 skipped_short_series: 0,
                 signal_count: 0,
+                failed_symbols: Vec::new(),
                 result: None,
                 error: None,
                 created_at: Utc::now(),
@@ -384,6 +391,7 @@ async fn mark_market_scan_job_running(state: &AppState, job_id: &str, resolved_s
         job.status = MarketScanJobStatus::Running;
         job.resolved_symbols = resolved_symbols;
         job.started_at = Some(Utc::now());
+        job.failed_symbols.clear();
         job.error = None;
     }
 }
@@ -401,6 +409,9 @@ async fn update_market_scan_job_progress(
         job.series_count = progress.series_count;
         job.skipped_short_series = progress.skipped_short_series;
         job.signal_count = progress.signal_count;
+        if let Some(failure) = progress.latest_failure {
+            job.failed_symbols.push(failure);
+        }
     }
 }
 
@@ -420,6 +431,7 @@ async fn complete_market_scan_job(
         job.series_count = report.series_count;
         job.skipped_short_series = report.skipped_short_series;
         job.signal_count = report.signal_count;
+        job.failed_symbols = report.failed_symbols.clone();
         job.result = Some(report.clone());
         job.error = None;
         job.finished_at = Some(Utc::now());
@@ -460,6 +472,7 @@ fn pattern_market_job_response(job: MarketScanJob) -> PatternMarketJobResponse {
         series_count,
         skipped_short_series,
         signal_count,
+        failed_symbols,
         result,
         error,
         created_at,
@@ -479,6 +492,7 @@ fn pattern_market_job_response(job: MarketScanJob) -> PatternMarketJobResponse {
         series_count,
         skipped_short_series,
         signal_count,
+        failed_symbols,
         error,
         created_at: created_at.to_rfc3339(),
         started_at: started_at.map(|value| value.to_rfc3339()),
@@ -500,6 +514,7 @@ fn pattern_market_response(
         skipped_short_series: report.skipped_short_series,
         signal_count: report.signal_count,
         fetched_symbols: report.fetched_symbols.len(),
+        failed_symbols: report.failed_symbols,
         signals: report.signals,
     }
 }

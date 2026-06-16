@@ -10,6 +10,7 @@ arrow-schema = "56"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 csv = "1"
+futures-util = "0.3"
 home = "=0.5.9"
 parquet = { version = "56", features = ["arrow"] }
 polars = { version = "0.46", default-features = false, features = ["lazy", "fmt", "rolling_window", "strings"] }

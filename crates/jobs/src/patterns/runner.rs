@@ -1,8 +1,10 @@
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::NaiveDate;
+use futures_util::FutureExt;
 use polars::prelude::DataFrame;
 use tokio::task::JoinSet;
 
@@ -11,9 +13,11 @@ use crate::kline_frame::{concat_frames, frame_symbols};
 use crate::models::MarketRequest;
 use crate::patterns::detectors::PatternDetector;
 use crate::patterns::indicators::SeriesIndicators;
-use crate::patterns::model::{BarSeries, PatternScanReport, PatternScanRequest, PatternSignal};
+use crate::patterns::model::{
+    BarSeries, PatternScanFailure, PatternScanReport, PatternScanRequest, PatternSignal,
+};
 use crate::tdx_source;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Debug, Clone)]
 pub struct PatternDataSourceConfig {
@@ -45,13 +49,15 @@ pub struct PatternScanner {
     data_source: PatternDataSourceConfig,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PatternScanProgress {
     pub requested_symbols: usize,
     pub completed_symbols: usize,
     pub series_count: usize,
     pub skipped_short_series: usize,
     pub signal_count: usize,
+    pub failed_symbols: usize,
+    pub latest_failure: Option<PatternScanFailure>,
 }
 
 impl PatternScanner {
@@ -98,6 +104,7 @@ impl PatternScanner {
         let mut series_count = 0usize;
         let mut skipped_short_series = 0usize;
         let mut fetched_symbols = Vec::<String>::new();
+        let mut failed_symbols = Vec::<PatternScanFailure>::new();
         let mut signals = Vec::<PatternSignal>::new();
         let requested_symbols = request.symbols.len();
         let mut completed_symbols = 0usize;
@@ -110,20 +117,58 @@ impl PatternScanner {
                 let data_source = self.data_source.clone();
                 let detectors = Arc::clone(&self.detectors);
                 join_set.spawn(async move {
-                    let bars = fetch_remote_bars_with_config(
-                        data_source,
-                        std::slice::from_ref(&symbol),
-                        start_date,
-                        end_date,
-                    )
-                    .await?;
-                    Ok::<_, anyhow::Error>(scan_symbol(symbol, bars, detectors.as_ref()))
+                    let worker_symbol = symbol.clone();
+                    match AssertUnwindSafe(async move {
+                        let bars = fetch_remote_bars_with_config(
+                            data_source,
+                            std::slice::from_ref(&symbol),
+                            start_date,
+                            end_date,
+                        )
+                        .await?;
+                        Ok::<_, anyhow::Error>(scan_symbol(symbol, bars, detectors.as_ref()))
+                    })
+                    .catch_unwind()
+                    .await
+                    {
+                        Ok(Ok(result)) => result,
+                        Ok(Err(err)) => symbol_scan_failure(worker_symbol, err),
+                        Err(panic) => symbol_scan_failure(
+                            worker_symbol,
+                            anyhow!("pattern symbol worker panicked: {}", panic_message(&panic)),
+                        ),
+                    }
                 });
                 next_symbol_idx += 1;
             }
 
             if let Some(result) = join_set.join_next().await {
-                let result = result.context("pattern symbol worker join failed")??;
+                let result = match result {
+                    Ok(result) => result,
+                    Err(err) => {
+                        let failure = PatternScanFailure {
+                            symbol: "<unknown>".to_string(),
+                            error: format!("pattern symbol worker join failed: {err}"),
+                        };
+                        warn!(
+                            target: "rstock_jobs::patterns",
+                            error = %failure.error,
+                            "pattern symbol worker join failed"
+                        );
+                        failed_symbols.push(failure.clone());
+                        completed_symbols += 1;
+                        on_progress(PatternScanProgress {
+                            requested_symbols,
+                            completed_symbols,
+                            series_count,
+                            skipped_short_series,
+                            signal_count: signals.len(),
+                            failed_symbols: failed_symbols.len(),
+                            latest_failure: Some(failure),
+                        });
+                        continue;
+                    }
+                };
                 completed_symbols += 1;
                 if result.had_series {
                     series_count += 1;
@@ -132,6 +177,9 @@ impl PatternScanner {
                 if result.skipped_short {
                     skipped_short_series += 1;
                 }
+                if let Some(failure) = result.failure.clone() {
+                    failed_symbols.push(failure.clone());
+                }
                 signals.extend(result.signals);
                 on_progress(PatternScanProgress {
                     requested_symbols,
@@ -139,6 +187,8 @@ impl PatternScanner {
                     series_count,
                     skipped_short_series,
                     signal_count: signals.len(),
+                    failed_symbols: failed_symbols.len(),
+                    latest_failure: result.failure,
                 });
             }
         }
@@ -149,6 +199,7 @@ impl PatternScanner {
             series_count,
             skipped_short_series,
             signal_count = signals.len(),
+            failed_symbols = failed_symbols.len(),
             fetched_symbols = fetched_symbols.len(),
             "pattern scan done"
         );
@@ -158,6 +209,7 @@ impl PatternScanner {
             series_count,
             signal_count: signals.len(),
             fetched_symbols,
+            failed_symbols,
             signals,
         })
     }
@@ -268,6 +320,7 @@ struct SymbolScanResult {
     symbol: String,
     had_series: bool,
     skipped_short: bool,
+    failure: Option<PatternScanFailure>,
     signals: Vec<PatternSignal>,
 }
 
@@ -288,6 +341,7 @@ fn scan_symbol(
             symbol,
             had_series: false,
             skipped_short: false,
+            failure: None,
             signals: Vec::new(),
         };
     };
@@ -301,6 +355,7 @@ fn scan_symbol(
             symbol,
             had_series: false,
             skipped_short: false,
+            failure: None,
             signals: Vec::new(),
         };
     }
@@ -315,6 +370,7 @@ fn scan_symbol(
             symbol,
             had_series: true,
             skipped_short: true,
+            failure: None,
             signals: Vec::new(),
         };
     }
@@ -335,8 +391,36 @@ fn scan_symbol(
         symbol,
         had_series: true,
         skipped_short: false,
+        failure: None,
         signals,
     }
+}
+
+fn symbol_scan_failure(symbol: String, err: anyhow::Error) -> SymbolScanResult {
+    let error = format!("{err:#}");
+    warn!(
+        target: "rstock_jobs::patterns",
+        symbol = %symbol,
+        error = %error,
+        "pattern scan symbol failed"
+    );
+    SymbolScanResult {
+        symbol: symbol.clone(),
+        had_series: false,
+        skipped_short: false,
+        failure: Some(PatternScanFailure { symbol, error }),
+        signals: Vec::new(),
+    }
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "unknown panic payload".to_string()
 }
 
 async fn fetch_batch_with_split(

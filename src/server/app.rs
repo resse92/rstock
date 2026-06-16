@@ -1,9 +1,9 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
-use jobs::patterns::PatternScanReport;
+use jobs::patterns::{PatternScanFailure, PatternScanReport};
 use tokio::sync::Mutex;
 
 use super::whole_quote::WholeQuoteSubscription;
@@ -27,6 +27,7 @@ pub struct MarketScanJob {
     pub series_count: usize,
     pub skipped_short_series: usize,
     pub signal_count: usize,
+    pub failed_symbols: Vec<PatternScanFailure>,
     pub result: Option<PatternScanReport>,
     pub error: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -71,7 +72,10 @@ impl AppState {
 pub fn cleanup_market_scan_jobs(jobs: &mut HashMap<String, MarketScanJob>, now: DateTime<Utc>) {
     let expire_before = now - Duration::hours(MARKET_SCAN_JOB_TTL_HOURS);
     jobs.retain(|_, job| {
-        if !matches!(job.status, MarketScanJobStatus::Succeeded | MarketScanJobStatus::Failed) {
+        if !matches!(
+            job.status,
+            MarketScanJobStatus::Succeeded | MarketScanJobStatus::Failed
+        ) {
             return true;
         }
 
@@ -86,8 +90,15 @@ pub fn cleanup_market_scan_jobs(jobs: &mut HashMap<String, MarketScanJob>, now: 
     let mut removable = jobs
         .iter()
         .filter_map(|(job_id, job)| {
-            if matches!(job.status, MarketScanJobStatus::Succeeded | MarketScanJobStatus::Failed) {
-                Some((job_id.clone(), job.finished_at.unwrap_or(job.created_at), job.created_at))
+            if matches!(
+                job.status,
+                MarketScanJobStatus::Succeeded | MarketScanJobStatus::Failed
+            ) {
+                Some((
+                    job_id.clone(),
+                    job.finished_at.unwrap_or(job.created_at),
+                    job.created_at,
+                ))
             } else {
                 None
             }

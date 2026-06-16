@@ -4,9 +4,8 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use polars::prelude::DataFrame;
 use qmt::common::{AdjustType, QuotePeriod, Status as QmtStatus};
-use qmt::data::{KlineHistoryRequest, SectorListResponse};
+use qmt::data::{KlineHistoryRequest, StockListInSectorRequest};
 use qmt::QmtClient;
-use serde_json::{json, Value};
 use tonic::transport::Endpoint;
 
 use crate::kline_frame::qmt_kline_response_to_frame;
@@ -71,34 +70,43 @@ impl ApiClient {
         Ok(response)
     }
 
-    pub async fn fetch_sectors(&self) -> Result<Value> {
-        let response = self
-            .client
-            .data()
-            .get_sector_list(())
-            .await
-            .context("调用 gRPC GetSectorList 失败")?
-            .into_inner();
-
-        ensure_status_ok(response.status.as_ref(), "GetSectorList")?;
-        Ok(sector_response_to_json(response))
-    }
-
     pub async fn discover_all_stock_codes(&self) -> Result<Vec<String>> {
-        let v = self
-            .fetch_sectors()
+        let codes = self
+            .fetch_sector_stock_codes(HS_A_SHARE_SECTOR_NAME)
             .await
-            .context("调用 GetSectorList 失败")?;
-        let codes: BTreeSet<String> = extract_stock_list(&v)
+            .with_context(|| format!("调用 GetStockListInSector 失败: {HS_A_SHARE_SECTOR_NAME}"))?;
+        let codes: BTreeSet<String> = codes
             .into_iter()
-            .filter(|code| is_hsba_a_share(code))
+            .filter(|code| is_hsa_a_share(code))
             .collect();
         if codes.is_empty() {
-            return Err(anyhow!("GetSectorList 未返回任何沪深京A股代码"));
+            return Err(anyhow!(
+                "GetStockListInSector 未返回任何沪深A股代码: {HS_A_SHARE_SECTOR_NAME}"
+            ));
         }
         Ok(codes.into_iter().collect())
     }
+
+    async fn fetch_sector_stock_codes(&self, sector_name: &str) -> Result<Vec<String>> {
+        let response = self
+            .client
+            .data()
+            .get_stock_list_in_sector(StockListInSectorRequest {
+                sector_name: sector_name.to_string(),
+            })
+            .await
+            .with_context(|| format!("调用 gRPC GetStockListInSector 失败: {sector_name}"))?
+            .into_inner();
+
+        ensure_status_ok(response.status.as_ref(), "GetStockListInSector")?;
+        Ok(response
+            .sector
+            .map(|sector| sector.symbols)
+            .unwrap_or_default())
+    }
 }
+
+const HS_A_SHARE_SECTOR_NAME: &str = "沪深A股";
 
 fn ensure_status_ok(status: Option<&QmtStatus>, action: &str) -> Result<()> {
     match status {
@@ -150,22 +158,7 @@ fn map_adjust_type(adjust_type: &str) -> Result<AdjustType> {
     }
 }
 
-fn sector_response_to_json(response: SectorListResponse) -> Value {
-    Value::Array(
-        response
-            .sectors
-            .into_iter()
-            .map(|sector| {
-                json!({
-                    "sector_name": sector.sector_name,
-                    "stock_list": sector.symbols,
-                })
-            })
-            .collect(),
-    )
-}
-
-fn is_hsba_a_share(code: &str) -> bool {
+fn is_hsa_a_share(code: &str) -> bool {
     let trimmed = code.trim();
     if trimmed.is_empty() {
         return false;
@@ -196,96 +189,17 @@ fn is_hsba_a_share(code: &str) -> bool {
         || d6.starts_with("003")
         || d6.starts_with("300")
         || d6.starts_with("301");
-    let bj_a = d6.starts_with("430")
-        || d6.starts_with("440")
-        || d6.starts_with("830")
-        || d6.starts_with("831")
-        || d6.starts_with("832")
-        || d6.starts_with("833")
-        || d6.starts_with("834")
-        || d6.starts_with("835")
-        || d6.starts_with("836")
-        || d6.starts_with("837")
-        || d6.starts_with("838")
-        || d6.starts_with("839")
-        || d6.starts_with("870")
-        || d6.starts_with("871")
-        || d6.starts_with("872")
-        || d6.starts_with("873")
-        || d6.starts_with("874")
-        || d6.starts_with("875")
-        || d6.starts_with("876")
-        || d6.starts_with("877")
-        || d6.starts_with("878")
-        || d6.starts_with("879")
-        || d6.starts_with("880")
-        || d6.starts_with("881")
-        || d6.starts_with("882")
-        || d6.starts_with("883")
-        || d6.starts_with("884")
-        || d6.starts_with("885")
-        || d6.starts_with("886")
-        || d6.starts_with("887")
-        || d6.starts_with("888")
-        || d6.starts_with("920");
-
     match exchange.as_deref() {
         Some("SH") => sh_a,
         Some("SZ") => sz_a,
-        Some("BJ") => bj_a,
         Some(_) => false,
-        None => sh_a || sz_a || bj_a,
-    }
-}
-
-fn extract_stock_list(v: &Value) -> Vec<String> {
-    match v {
-        Value::Null => vec![],
-        Value::Array(arr) => {
-            let mut out = Vec::new();
-            for item in arr {
-                match item {
-                    Value::String(s) => out.push(s.to_string()),
-                    Value::Object(obj) => {
-                        if let Some(Value::Array(codes)) = obj.get("stock_list") {
-                            for c in codes {
-                                if let Some(s) = c.as_str() {
-                                    out.push(s.to_string());
-                                }
-                            }
-                        } else if let Some(s) = obj.get("stock_code").and_then(|x| x.as_str()) {
-                            out.push(s.to_string());
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            out
-        }
-        Value::Object(obj) => {
-            if let Some(Value::Array(codes)) = obj.get("stock_list") {
-                return codes
-                    .iter()
-                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                    .collect();
-            }
-            for key in ["data", "result", "items"] {
-                if let Some(nested) = obj.get(key) {
-                    let inner = extract_stock_list(nested);
-                    if !inner.is_empty() {
-                        return inner;
-                    }
-                }
-            }
-            vec![]
-        }
-        _ => vec![],
+        None => sh_a || sz_a,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_base_url;
+    use super::{is_hsa_a_share, normalize_base_url};
 
     #[test]
     fn normalize_base_url_adds_http_scheme_when_missing() {
@@ -301,5 +215,16 @@ mod tests {
             normalize_base_url("https://103.85.227.158:40003"),
             "https://103.85.227.158:40003"
         );
+    }
+
+    #[test]
+    fn hs_a_share_filter_accepts_shenzhen_and_shanghai() {
+        assert!(is_hsa_a_share("600000.SH"));
+        assert!(is_hsa_a_share("000001.SZ"));
+    }
+
+    #[test]
+    fn hs_a_share_filter_rejects_beijing_exchange() {
+        assert!(!is_hsa_a_share("830799.BJ"));
     }
 }

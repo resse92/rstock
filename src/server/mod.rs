@@ -25,7 +25,7 @@ pub use self::config::ServerConfig;
 use self::errors::{ok, ApiError, ApiResponse};
 use self::patterns::{
     check_all_patterns, check_single_pattern, get_market_scan_job, list_patterns,
-    scan_market_by_pattern,
+    scan_market_all_patterns, scan_market_by_pattern,
 };
 use self::tdx::{get_tdx_daily_kline, get_tdx_minute_kline};
 use self::whole_quote::{
@@ -62,6 +62,10 @@ pub async fn run_server(args: ServerConfig) -> Result<()> {
         .route("/api/v1/patterns/check-all", post(check_all_patterns))
         .route("/api/v1/patterns/list", get(list_patterns))
         .route("/api/v1/patterns/scan-market", post(scan_market_by_pattern))
+        .route(
+            "/api/v1/patterns/scan-market-all",
+            post(scan_market_all_patterns),
+        )
         .route(
             "/api/v1/patterns/scan-market/{job_id}",
             get(get_market_scan_job),

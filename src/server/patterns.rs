@@ -48,6 +48,14 @@ pub struct PatternMarketRequest {
     pub symbols: Option<Vec<String>>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PatternMarketAllRequest {
+    pub trade_date: String,
+    pub history_days: Option<i64>,
+    pub refresh_remote: Option<bool>,
+    pub symbols: Option<Vec<String>>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct PatternSingleResponse {
     pub symbol: String,
@@ -220,33 +228,16 @@ pub async fn scan_market_by_pattern(
         "scan market by pattern"
     );
 
-    {
-        let mut jobs = state.market_scan_jobs.lock().await;
-        cleanup_market_scan_jobs(&mut jobs, Utc::now());
-        jobs.insert(
-            job_id.clone(),
-            MarketScanJob {
-                job_id: job_id.clone(),
-                pattern_id: req.pattern_id.clone(),
-                trade_date,
-                history_days,
-                refresh_remote,
-                status: MarketScanJobStatus::Queued,
-                requested_symbols,
-                resolved_symbols: 0,
-                completed_symbols: 0,
-                series_count: 0,
-                skipped_short_series: 0,
-                signal_count: 0,
-                failed_symbols: Vec::new(),
-                result: None,
-                error: None,
-                created_at: Utc::now(),
-                started_at: None,
-                finished_at: None,
-            },
-        );
-    }
+    enqueue_market_scan_job(
+        &state,
+        job_id.clone(),
+        req.pattern_id.clone(),
+        trade_date,
+        history_days,
+        refresh_remote,
+        requested_symbols,
+    )
+    .await;
 
     let task_state = state.clone();
     let pattern_id = req.pattern_id;
@@ -254,6 +245,62 @@ pub async fn scan_market_by_pattern(
     let task_job_id = job_id.clone();
     tokio::spawn(async move {
         if let Err(err) = run_market_scan_job(
+            task_state.clone(),
+            task_job_id.clone(),
+            pattern_id,
+            trade_date,
+            history_days,
+            refresh_remote,
+            requested_symbols_input,
+        )
+        .await
+        {
+            fail_market_scan_job(&task_state, &task_job_id, format!("{err:#}")).await;
+        }
+    });
+
+    Ok(Json(PatternMarketJobAcceptedResponse {
+        job_id,
+        status: market_scan_job_status_label(MarketScanJobStatus::Queued).to_string(),
+    }))
+}
+
+pub async fn scan_market_all_patterns(
+    State(state): State<AppState>,
+    Json(req): Json<PatternMarketAllRequest>,
+) -> Result<Json<PatternMarketJobAcceptedResponse>, ApiError> {
+    let trade_date = parse_request_date(&req.trade_date)?;
+    let history_days = req.history_days.unwrap_or(365).max(30);
+    let refresh_remote = req.refresh_remote.unwrap_or(false);
+    let requested_symbols = req.symbols.as_ref().map(|items| items.len()).unwrap_or(0);
+    let job_id = state.next_market_scan_job_id();
+    let pattern_id = "all".to_string();
+    info!(
+        target: "rstock::patterns",
+        job_id = %job_id,
+        trade_date = %trade_date,
+        history_days,
+        refresh_remote,
+        requested_symbols,
+        "scan market all patterns"
+    );
+
+    enqueue_market_scan_job(
+        &state,
+        job_id.clone(),
+        pattern_id.clone(),
+        trade_date,
+        history_days,
+        refresh_remote,
+        requested_symbols,
+    )
+    .await;
+
+    let task_state = state.clone();
+    let requested_symbols_input = req.symbols;
+    let task_job_id = job_id.clone();
+    tokio::spawn(async move {
+        if let Err(err) = run_market_scan_all_patterns_job(
             task_state.clone(),
             task_job_id.clone(),
             pattern_id,
@@ -397,6 +444,92 @@ async fn run_market_scan_job(
     );
     complete_market_scan_job(&state, &job_id, &pattern_id, trade_date, report).await;
     Ok(())
+}
+
+async fn run_market_scan_all_patterns_job(
+    state: AppState,
+    job_id: String,
+    pattern_id: String,
+    trade_date: NaiveDate,
+    history_days: i64,
+    refresh_remote: bool,
+    requested_symbols_input: Option<Vec<String>>,
+) -> Result<()> {
+    let symbols = match requested_symbols_input {
+        Some(symbols) if !symbols.is_empty() => symbols,
+        _ => discover_market_symbols(&state).await?,
+    };
+    info!(
+        target: "rstock::patterns",
+        job_id = %job_id,
+        resolved_symbols = symbols.len(),
+        detectors = available_pattern_ids().len(),
+        "resolved market symbols for all-pattern scan"
+    );
+    mark_market_scan_job_running(&state, &job_id, symbols.len()).await;
+
+    let scanner = build_scanner(&state, default_detectors())?;
+    let progress_state = state.clone();
+    let progress_job_id = job_id.clone();
+    let notify_state = state.clone();
+    let notify_job_id = job_id.clone();
+    let report = run_scan_with_progress(
+        &scanner,
+        symbols,
+        trade_date,
+        history_days,
+        refresh_remote,
+        move |progress| {
+            let progress_state = progress_state.clone();
+            let progress_job_id = progress_job_id.clone();
+            tokio::spawn(async move {
+                update_market_scan_job_progress(&progress_state, &progress_job_id, progress).await;
+            });
+        },
+    )
+    .await?;
+    dispatch_feishu_report(
+        notify_state,
+        render_market_scan_feishu_message(&notify_job_id, &pattern_id, trade_date, &report),
+    );
+    complete_market_scan_job(&state, &job_id, &pattern_id, trade_date, report).await;
+    Ok(())
+}
+
+async fn enqueue_market_scan_job(
+    state: &AppState,
+    job_id: String,
+    pattern_id: String,
+    trade_date: NaiveDate,
+    history_days: i64,
+    refresh_remote: bool,
+    requested_symbols: usize,
+) {
+    let mut jobs = state.market_scan_jobs.lock().await;
+    cleanup_market_scan_jobs(&mut jobs, Utc::now());
+    jobs.insert(
+        job_id.clone(),
+        MarketScanJob {
+            job_id,
+            pattern_id,
+            trade_date,
+            history_days,
+            refresh_remote,
+            status: MarketScanJobStatus::Queued,
+            requested_symbols,
+            resolved_symbols: 0,
+            completed_symbols: 0,
+            series_count: 0,
+            skipped_short_series: 0,
+            signal_count: 0,
+            failed_symbols: Vec::new(),
+            result: None,
+            error: None,
+            created_at: Utc::now(),
+            started_at: None,
+            finished_at: None,
+        },
+    );
 }
 
 async fn mark_market_scan_job_running(state: &AppState, job_id: &str, resolved_symbols: usize) {

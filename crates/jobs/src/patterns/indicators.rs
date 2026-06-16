@@ -26,6 +26,7 @@ pub struct SeriesIndicators {
 
 impl SeriesIndicators {
     pub fn calculate(series: &BarSeries) -> Self {
+        let len = series.len();
         let closes = f64_values(series, "close");
         let highs = f64_values(series, "high");
         let lows = f64_values(series, "low");
@@ -88,7 +89,7 @@ impl SeriesIndicators {
             })
             .collect();
 
-        Self {
+        let indicators = Self {
             ma5,
             ma10,
             ma20,
@@ -109,7 +110,32 @@ impl SeriesIndicators {
             rsi14,
             short_trend,
             bull_bear_line,
-        }
+        };
+        debug_assert!(indicators.has_length(len));
+        indicators
+    }
+
+    fn has_length(&self, len: usize) -> bool {
+        self.ma5.len() == len
+            && self.ma10.len() == len
+            && self.ma20.len() == len
+            && self.ma25.len() == len
+            && self.ma30.len() == len
+            && self.volume_ma5.len() == len
+            && self.volume_ma10.len() == len
+            && self.volume_ma60.len() == len
+            && self.dif.len() == len
+            && self.dea.len() == len
+            && self.macd_hist.len() == len
+            && self.k.len() == len
+            && self.d.len() == len
+            && self.j.len() == len
+            && self.boll_mid.len() == len
+            && self.boll_upper.len() == len
+            && self.boll_lower.len() == len
+            && self.rsi14.len() == len
+            && self.short_trend.len() == len
+            && self.bull_bear_line.len() == len
     }
 }
 
@@ -125,17 +151,19 @@ fn f64_values(series: &BarSeries, column: &str) -> Vec<f64> {
                 .collect()
         })
         .unwrap_or_else(|| match column {
+            // Keep indicator vectors aligned with the bar series length even when
+            // a column is absent or contains nulls.
             "close" => (0..series.len())
-                .filter_map(|idx| series.close_at(idx))
+                .map(|idx| series.close_at(idx).unwrap_or_default())
                 .collect(),
             "high" => (0..series.len())
-                .filter_map(|idx| series.high_at(idx))
+                .map(|idx| series.high_at(idx).unwrap_or_default())
                 .collect(),
             "low" => (0..series.len())
-                .filter_map(|idx| series.low_at(idx))
+                .map(|idx| series.low_at(idx).unwrap_or_default())
                 .collect(),
             "volume" => (0..series.len())
-                .filter_map(|idx| series.volume_at(idx))
+                .map(|idx| series.volume_at(idx).unwrap_or_default())
                 .collect(),
             _ => Vec::new(),
         })
@@ -323,7 +351,9 @@ fn rsi(values: &[f64], period: usize) -> Vec<Option<f64>> {
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
+    use polars::df;
 
+    use crate::patterns::detectors::default_detectors;
     use crate::patterns::model::{Bar, BarSeries};
 
     use super::SeriesIndicators;
@@ -347,7 +377,55 @@ mod tests {
         let series = BarSeries::new("000001.SZ".to_string(), "SZ".to_string(), bars);
         let indicators = SeriesIndicators::calculate(&series);
         assert_eq!(indicators.ma5.len(), 30);
+        assert!(indicators.has_length(series.len()));
         assert!(indicators.ma20[19].is_some());
         assert!(indicators.boll_upper[19].is_some());
+    }
+
+    #[test]
+    fn computes_indicator_lengths_when_volume_column_is_missing() {
+        let frame = df!(
+            "symbol" => ["000001.SZ", "000001.SZ", "000001.SZ"],
+            "exchange" => ["SZ", "SZ", "SZ"],
+            "time" => ["2025-01-01", "2025-01-02", "2025-01-03"],
+            "open" => [10.0, 10.2, 10.4],
+            "high" => [10.3, 10.5, 10.7],
+            "low" => [9.9, 10.0, 10.2],
+            "close" => [10.1, 10.3, 10.6]
+        )
+        .unwrap();
+        let series =
+            BarSeries::from_frame("000001.SZ".to_string(), "SZ".to_string(), frame).unwrap();
+
+        let indicators = SeriesIndicators::calculate(&series);
+
+        assert!(indicators.has_length(series.len()));
+        assert_eq!(indicators.volume_ma5.len(), series.len());
+        assert_eq!(indicators.ma5.len(), series.len());
+    }
+
+    #[test]
+    fn default_detectors_do_not_panic_when_optional_columns_are_missing() {
+        let times = (1..=130)
+            .map(|day| format!("2025-01-{day:02}"))
+            .collect::<Vec<_>>();
+        let frame = df!(
+            "symbol" => vec!["000001.SZ"; 130],
+            "exchange" => vec!["SZ"; 130],
+            "time" => times,
+            "open" => (0..130).map(|idx| 10.0 + idx as f64 * 0.1).collect::<Vec<_>>(),
+            "high" => (0..130).map(|idx| 10.3 + idx as f64 * 0.1).collect::<Vec<_>>(),
+            "low" => (0..130).map(|idx| 9.8 + idx as f64 * 0.1).collect::<Vec<_>>(),
+            "close" => (0..130).map(|idx| 10.1 + idx as f64 * 0.1).collect::<Vec<_>>()
+        )
+        .unwrap();
+        let series =
+            BarSeries::from_frame("000001.SZ".to_string(), "SZ".to_string(), frame).unwrap();
+        let indicators = SeriesIndicators::calculate(&series);
+
+        assert!(indicators.has_length(series.len()));
+        for detector in default_detectors() {
+            detector.detect(&series, &indicators);
+        }
     }
 }

@@ -137,10 +137,7 @@ impl PatternDetector for LimitUpPullbackDetector {
                     .is_some_and(|volume| volume <= shrink_threshold)
             });
 
-            let vol_ratio = indicators
-                .volume_ma5
-                .get(latest_idx)
-                .and_then(|value| *value)
+            let vol_ratio = indicators.volume_ma5[latest_idx]
                 .map(|value| latest_volume / value.max(1e-6))
                 .unwrap_or(0.0);
 

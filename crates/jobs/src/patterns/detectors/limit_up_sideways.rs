@@ -55,20 +55,20 @@ impl PatternDetector for LimitUpSidewaysDetector {
     }
 
     fn detect(&self, series: &BarSeries, indicators: &SeriesIndicators) -> Option<PatternSignal> {
-        let bars = &series.bars;
-        if bars.len() < 15 {
+        if series.len() < 15 {
             return None;
         }
         let latest_idx = latest_idx(series);
 
         for limit_idx in (latest_idx.saturating_sub(self.limit_up_lookback_days)..latest_idx).rev()
         {
-            let change = pct_change(bars, limit_idx)?;
+            let change = pct_change(series, limit_idx)?;
             if change < self.limit_up_threshold {
                 continue;
             }
+            let limit_bar = series.bar(limit_idx)?;
             let vol_ma = indicators.volume_ma5[limit_idx]?;
-            if bars[limit_idx].volume < vol_ma * self.volume_ratio_threshold {
+            if limit_bar.volume < vol_ma * self.volume_ratio_threshold {
                 continue;
             }
             if latest_idx <= limit_idx {
@@ -78,34 +78,36 @@ impl PatternDetector for LimitUpSidewaysDetector {
             if sideways_days < self.sideways_days_min || sideways_days > self.sideways_days_max {
                 continue;
             }
-            let highest = window_high(bars, limit_idx + 1, latest_idx);
-            let lowest = window_low(bars, limit_idx + 1, latest_idx);
-            let limit_close = bars[limit_idx].close;
+            let highest = window_high(series, limit_idx + 1, latest_idx);
+            let lowest = window_low(series, limit_idx + 1, latest_idx);
+            let limit_close = limit_bar.close;
             if highest > limit_close * (1.0 + self.sideways_high_limit)
                 || lowest < limit_close * (1.0 + self.sideways_low_limit)
             {
                 continue;
             }
             let support_lower_limit = limit_close * (1.0 + self.support_drop_limit);
-            if bars[limit_idx + 1..=latest_idx]
-                .iter()
-                .any(|bar| bar.close < support_lower_limit)
-            {
+            if (limit_idx + 1..=latest_idx).any(|idx| {
+                series
+                    .bar(idx)
+                    .is_some_and(|bar| bar.close < support_lower_limit)
+            }) {
                 continue;
             }
-            if bars[limit_idx + 1..=latest_idx]
-                .iter()
-                .all(|bar| bar.volume > bars[limit_idx].volume * self.volume_shrinkage_ratio)
-            {
+            if (limit_idx + 1..=latest_idx).all(|idx| {
+                series
+                    .bar(idx)
+                    .is_some_and(|bar| bar.volume > limit_bar.volume * self.volume_shrinkage_ratio)
+            }) {
                 continue;
             }
             if latest_idx == 0 {
                 continue;
             }
-            let volume_increase = bars[latest_idx].volume / bars[latest_idx - 1].volume.max(1e-6);
-            if bars[latest_idx].close <= bars[latest_idx - 1].close
-                || volume_increase < self.volume_increase_ratio
-            {
+            let latest_bar = series.bar(latest_idx)?;
+            let prev_bar = series.bar(latest_idx - 1)?;
+            let volume_increase = latest_bar.volume / prev_bar.volume.max(1e-6);
+            if latest_bar.close <= prev_bar.close || volume_increase < self.volume_increase_ratio {
                 continue;
             }
             let k = indicators.k[latest_idx]?;
@@ -118,21 +120,19 @@ impl PatternDetector for LimitUpSidewaysDetector {
             let prev_dea = indicators.dea[latest_idx - 1]?;
             let kdj_cross = prev_k <= prev_d && k > d && k < self.kdj_gold_cross_threshold;
             let macd_cross = prev_dif <= prev_dea && dif > dea;
-            if !is_bullish(&bars[latest_idx]) || !(kdj_cross || macd_cross) {
+            if !is_bullish(&latest_bar) || !(kdj_cross || macd_cross) {
                 continue;
             }
-            let avg_sideways_volume = bars[limit_idx + 1..=latest_idx]
-                .iter()
-                .map(|bar| bar.volume)
+            let avg_sideways_volume = (limit_idx + 1..=latest_idx)
+                .filter_map(|idx| series.bar(idx).map(|bar| bar.volume))
                 .sum::<f64>()
                 / sideways_days as f64;
-            let price_change = (bars[latest_idx].close - bars[latest_idx - 1].close)
-                / bars[latest_idx - 1].close.max(1e-6);
+            let price_change = (latest_bar.close - prev_bar.close) / prev_bar.close.max(1e-6);
             let reasons = vec![
                 format!(
                     "近 {} 日出现放量涨停，量比 {:.2}",
                     self.limit_up_lookback_days,
-                    bars[limit_idx].volume / vol_ma.max(1e-6)
+                    limit_bar.volume / vol_ma.max(1e-6)
                 ),
                 format!(
                     "涨停后横盘 {} 天，区间 [{:.2}, {:.2}] 未跌破支撑 {:.2}",
@@ -151,19 +151,19 @@ impl PatternDetector for LimitUpSidewaysDetector {
             return Some(signal(
                 self.id(),
                 series,
-                bars[latest_idx].time,
+                latest_bar.time,
                 0.76,
                 &["limit-up", "sideways"],
                 "近期涨停后横盘整理，最新一日以KDJ或MACD转强信号确认。",
                 json!({
-                    "key_date": bars[limit_idx].time.format("%Y-%m-%d").to_string(),
+                    "key_date": limit_bar.time.format("%Y-%m-%d").to_string(),
                     "key_date_type": "涨停日",
-                    "limit_up_date": bars[limit_idx].time.format("%Y-%m-%d").to_string(),
+                    "limit_up_date": limit_bar.time.format("%Y-%m-%d").to_string(),
                     "support_level": limit_close,
                     "sideways_days": sideways_days,
                     "sideways_highest": highest,
                     "sideways_lowest": lowest,
-                    "sideways_volume_ratio": avg_sideways_volume / bars[limit_idx].volume.max(1e-6),
+                    "sideways_volume_ratio": avg_sideways_volume / limit_bar.volume.max(1e-6),
                     "support_lower_limit": support_lower_limit,
                     "volume_increase": volume_increase,
                     "price_change": price_change,

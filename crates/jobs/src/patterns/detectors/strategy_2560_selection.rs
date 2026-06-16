@@ -29,8 +29,8 @@ impl PatternDetector for Strategy2560SelectionDetector {
         if idx < 1 {
             return None;
         }
-        let latest = &series.bars[idx];
-        let prev = &series.bars[idx - 1];
+        let latest = series.bar(idx)?;
+        let prev = series.bar(idx - 1)?;
         let ma25 = indicators.ma25[idx]?;
         let prev_ma25 = indicators.ma25[idx - 1]?;
         let vol_ma5 = indicators.volume_ma5[idx]?;

@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 pub const DEFAULT_QMT_API_HOST: &str = "http://103.85.227.158:40002";
@@ -37,24 +36,6 @@ impl MarketRequest {
             disable_download: true,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NormalizedBar {
-    pub stock_code: String,
-    pub period: String,
-    pub ts_raw: Option<String>,
-    pub open: Option<f64>,
-    pub high: Option<f64>,
-    pub low: Option<f64>,
-    pub close: Option<f64>,
-    pub volume: Option<f64>,
-    pub amount: Option<f64>,
-    pub turnover_rate: Option<f64>,
-    pub open_interest: Option<f64>,
-    pub settle: Option<f64>,
-    pub adj_factor: Option<f64>,
-    pub extra_json: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,54 +122,4 @@ pub fn date_from_ts_raw(ts_raw: &str) -> Option<String> {
         return Some(format!("{}-{}-{}", &s[0..4], &s[4..6], &s[6..8]));
     }
     None
-}
-
-impl DailyBar {
-    pub fn from_normalized(raw: &NormalizedBar) -> Option<Self> {
-        if raw.period != "1d" {
-            return None;
-        }
-        let exchange = exchange_from_symbol(&raw.stock_code)?;
-        let ts = raw.ts_raw.as_deref()?;
-        let date = date_from_ts_raw(ts)?;
-        Some(Self {
-            symbol: raw.stock_code.clone(),
-            exchange,
-            time: date,
-            open: raw.open,
-            high: raw.high,
-            low: raw.low,
-            close: raw.close,
-            volume: raw.volume,
-            amount: raw.amount,
-            adj_factor: raw.adj_factor,
-            settle: raw.settle,
-            open_interest: raw.open_interest,
-            source: None,
-        })
-    }
-}
-
-impl MinuteBar1m {
-    pub fn from_normalized(raw: &NormalizedBar) -> Option<Self> {
-        if raw.period != "1m" {
-            return None;
-        }
-        let exchange = exchange_from_symbol(&raw.stock_code)?;
-        let ts = raw.ts_raw.as_deref()?;
-        Some(Self {
-            symbol: raw.stock_code.clone(),
-            exchange,
-            time: ts.to_string(),
-            open: raw.open,
-            high: raw.high,
-            low: raw.low,
-            close: raw.close,
-            volume: raw.volume,
-            turn_over: raw.amount,
-            turn_over_rate: raw.turnover_rate,
-            factor: 1.0,
-            source: None,
-        })
-    }
 }

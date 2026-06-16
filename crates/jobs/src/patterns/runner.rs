@@ -3,16 +3,15 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::NaiveDate;
+use polars::prelude::DataFrame;
 use tokio::task::JoinSet;
 
 use crate::api::ApiClient;
-use crate::models::{DailyBar, MarketRequest};
-use crate::normalize::normalize_full_kline_response;
+use crate::kline_frame::{concat_frames, frame_symbols};
+use crate::models::MarketRequest;
 use crate::patterns::detectors::PatternDetector;
 use crate::patterns::indicators::SeriesIndicators;
-use crate::patterns::model::{
-    Bar, BarSeries, PatternScanReport, PatternScanRequest, PatternSignal,
-};
+use crate::patterns::model::{BarSeries, PatternScanReport, PatternScanRequest, PatternSignal};
 use crate::tdx_source;
 use tracing::info;
 
@@ -169,9 +168,9 @@ async fn fetch_remote_bars_with_config(
     symbols: &[String],
     start_date: NaiveDate,
     end_date: NaiveDate,
-) -> Result<Vec<Bar>> {
+) -> Result<DataFrame> {
     if symbols.is_empty() {
-        return Ok(Vec::new());
+        return Ok(DataFrame::default());
     }
 
     let api = ApiClient::new(
@@ -187,7 +186,7 @@ async fn fetch_remote_bars_with_config(
         .collect::<Vec<_>>();
     let start = compact_date(start_date);
     let end = compact_date(end_date);
-    let mut all_daily_bars = Vec::new();
+    let mut frames = Vec::new();
     let mut next_batch_idx = 0usize;
     let mut join_set = JoinSet::new();
 
@@ -209,7 +208,7 @@ async fn fetch_remote_bars_with_config(
                 "fetch remote bars batch"
             );
             join_set.spawn(async move {
-                let mut daily_bars = fetch_batch_with_split(
+                let frame = fetch_batch_with_split(
                     &api_clone,
                     batch_idx + 1,
                     batch.clone(),
@@ -221,49 +220,44 @@ async fn fetch_remote_bars_with_config(
                 info!(
                     target: "rstock_jobs::patterns",
                     batch = batch_idx + 1,
-                    qmt_daily_bars = daily_bars.len(),
+                    qmt_daily_bars = frame.height(),
                     "qmt batch fetched"
                 );
-                if tdx_fallback && daily_bars.is_empty() {
+                if tdx_fallback && frame.height() == 0 {
                     info!(
                         target: "rstock_jobs::patterns",
                         batch = batch_idx + 1,
                         qmt_missing_symbols = batch.len(),
                         "qmt returned no bars, fallback to tdx"
                     );
-                    let fallback = tdx_source::fetch_daily_bars(&batch, &start_clone, &end_clone)?;
+                    let fallback =
+                        tdx_source::fetch_daily_bars_frame(&batch, &start_clone, &end_clone)?;
                     info!(
                         target: "rstock_jobs::patterns",
                         batch = batch_idx + 1,
-                        tdx_daily_bars = fallback.len(),
+                        tdx_daily_bars = fallback.height(),
                         "tdx fallback fetched"
                     );
-                    daily_bars.extend(fallback);
+                    return Ok::<DataFrame, anyhow::Error>(fallback);
                 }
 
-                Ok::<Vec<DailyBar>, anyhow::Error>(daily_bars)
+                Ok::<DataFrame, anyhow::Error>(frame)
             });
             next_batch_idx += 1;
         }
 
         if let Some(result) = join_set.join_next().await {
-            let batch_bars = result.context("pattern fetch worker join failed")??;
-            all_daily_bars.extend(batch_bars);
+            frames.push(result.context("pattern fetch worker join failed")??);
         }
     }
 
-    let mut bars = Vec::new();
-    for daily_bar in all_daily_bars {
-        if let Some(bar) = Bar::from_daily_bar(daily_bar)? {
-            bars.push(bar);
-        }
-    }
+    let frame = concat_frames(frames)?;
     info!(
         target: "rstock_jobs::patterns",
-        total_normalized_bars = bars.len(),
+        total_normalized_bars = frame.height(),
         "remote bars normalized"
     );
-    Ok(bars)
+    Ok(frame)
 }
 
 fn compact_date(date: NaiveDate) -> String {
@@ -279,10 +273,25 @@ struct SymbolScanResult {
 
 fn scan_symbol(
     symbol: String,
-    bars: Vec<Bar>,
+    frame: DataFrame,
     detectors: &[Box<dyn PatternDetector>],
 ) -> SymbolScanResult {
-    if bars.is_empty() {
+    let exchange = frame
+        .column("exchange")
+        .ok()
+        .and_then(|col| col.str().ok())
+        .and_then(|col| col.get(0))
+        .unwrap_or_default()
+        .to_string();
+    let Ok(series) = BarSeries::from_frame(symbol.clone(), exchange, frame) else {
+        return SymbolScanResult {
+            symbol,
+            had_series: false,
+            skipped_short: false,
+            signals: Vec::new(),
+        };
+    };
+    if series.is_empty() {
         info!(
             target: "rstock_jobs::patterns",
             symbol = %symbol,
@@ -295,12 +304,6 @@ fn scan_symbol(
             signals: Vec::new(),
         };
     }
-
-    let exchange = bars
-        .first()
-        .map(|bar| bar.exchange.clone())
-        .unwrap_or_default();
-    let series = BarSeries::new(symbol.clone(), exchange, bars);
     if series.len() < 20 {
         info!(
             target: "rstock_jobs::patterns",
@@ -343,7 +346,7 @@ async fn fetch_batch_with_split(
     start_date: &str,
     end_date: &str,
     adjust_type: &str,
-) -> Result<Vec<DailyBar>> {
+) -> Result<DataFrame> {
     let request = MarketRequest::new(
         symbols.clone(),
         "1d",
@@ -352,16 +355,20 @@ async fn fetch_batch_with_split(
         adjust_type.to_string(),
     );
 
-    match api.fetch_market_batch(&request).await {
-        Ok(payload) => {
-            let mut daily_bars = normalize_full_kline_response(&payload, "1d")
-                .into_iter()
-                .filter_map(|row| DailyBar::from_normalized(&row))
+    match api.fetch_kline_frame(&request).await {
+        Ok(frame) => {
+            let found = frame_symbols(&frame)?;
+            let missing = symbols
+                .iter()
+                .filter(|code| !found.contains(*code))
+                .cloned()
                 .collect::<Vec<_>>();
-            for bar in &mut daily_bars {
-                bar.source = Some("qmt".to_string());
+            if missing.is_empty() {
+                Ok(frame)
+            } else {
+                let fallback = tdx_source::fetch_daily_bars_frame(&missing, start_date, end_date)?;
+                concat_frames(vec![frame, fallback])
             }
-            Ok(daily_bars)
         }
         Err(err) if symbols.len() > 1 => {
             let mid = symbols.len() / 2;
@@ -376,7 +383,7 @@ async fn fetch_batch_with_split(
                 error = %err,
                 "qmt batch failed, splitting batch"
             );
-            let mut left_bars = Box::pin(fetch_batch_with_split(
+            let left_frame = Box::pin(fetch_batch_with_split(
                 api,
                 batch_no,
                 left,
@@ -385,7 +392,7 @@ async fn fetch_batch_with_split(
                 adjust_type,
             ))
             .await?;
-            let right_bars = Box::pin(fetch_batch_with_split(
+            let right_frame = Box::pin(fetch_batch_with_split(
                 api,
                 batch_no,
                 right,
@@ -394,8 +401,7 @@ async fn fetch_batch_with_split(
                 adjust_type,
             ))
             .await?;
-            left_bars.extend(right_bars);
-            Ok(left_bars)
+            concat_frames(vec![left_frame, right_frame])
         }
         Err(err) => Err(err).with_context(|| {
             format!(

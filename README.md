@@ -8,6 +8,8 @@
 
 服务配置统一读取项目根目录的 `config.toml`。可先参考 `config.example.toml` 创建本地配置。
 
+内部实现说明：QMT gRPC 和 TDX 返回的 K 线数据在项目内部统一转换为 `polars::DataFrame`，再进入同步、patterns 和 API 响应组装链路。
+
 接口：
 
 - `GET /healthz`

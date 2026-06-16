@@ -26,10 +26,10 @@ pub struct SeriesIndicators {
 
 impl SeriesIndicators {
     pub fn calculate(series: &BarSeries) -> Self {
-        let closes: Vec<f64> = series.bars.iter().map(|bar| bar.close).collect();
-        let highs: Vec<f64> = series.bars.iter().map(|bar| bar.high).collect();
-        let lows: Vec<f64> = series.bars.iter().map(|bar| bar.low).collect();
-        let volumes: Vec<f64> = series.bars.iter().map(|bar| bar.volume).collect();
+        let closes = f64_values(series, "close");
+        let highs = f64_values(series, "high");
+        let lows = f64_values(series, "low");
+        let volumes = f64_values(series, "volume");
 
         let ma5 = rolling_mean(&closes, 5);
         let ma10 = rolling_mean(&closes, 10);
@@ -111,6 +111,34 @@ impl SeriesIndicators {
             bull_bear_line,
         }
     }
+}
+
+fn f64_values(series: &BarSeries, column: &str) -> Vec<f64> {
+    series
+        .frame
+        .column(column)
+        .ok()
+        .and_then(|col| col.f64().ok())
+        .map(|values| {
+            (0..series.frame.height())
+                .map(|idx| values.get(idx).unwrap_or_default())
+                .collect()
+        })
+        .unwrap_or_else(|| match column {
+            "close" => (0..series.len())
+                .filter_map(|idx| series.bar(idx).map(|bar| bar.close))
+                .collect(),
+            "high" => (0..series.len())
+                .filter_map(|idx| series.bar(idx).map(|bar| bar.high))
+                .collect(),
+            "low" => (0..series.len())
+                .filter_map(|idx| series.bar(idx).map(|bar| bar.low))
+                .collect(),
+            "volume" => (0..series.len())
+                .filter_map(|idx| series.bar(idx).map(|bar| bar.volume))
+                .collect(),
+            _ => Vec::new(),
+        })
 }
 
 fn rolling_mean(values: &[f64], window: usize) -> Vec<Option<f64>> {

@@ -63,9 +63,9 @@ impl PatternDetector for MultiPartyCannonDetector {
         if idx < 2 {
             return None;
         }
-        let first = &series.bars[idx - 2];
-        let second = &series.bars[idx - 1];
-        let third = &series.bars[idx];
+        let first = series.bar(idx - 2)?;
+        let second = series.bar(idx - 1)?;
+        let third = series.bar(idx)?;
         let ma20 = indicators.ma20[idx];
         let vol_ma5 = indicators.volume_ma5[idx];
         let macd_hist = indicators.macd_hist[idx];
@@ -73,17 +73,17 @@ impl PatternDetector for MultiPartyCannonDetector {
 
         let first_rise = (first.close - first.open) / first.open.max(1e-6);
         let third_rise = (third.close - third.open) / third.open.max(1e-6);
-        let first_body = body_ratio(first);
-        let second_body = body_ratio(second);
+        let first_body = body_ratio(&first);
+        let second_body = body_ratio(&second);
         let first_body_abs = (first.close - first.open).abs();
         let fallback = (first.close - second.close).max(0.0) / first_body_abs.max(1e-6);
 
-        if !is_bullish(first)
+        if !is_bullish(&first)
             || first_rise < self.first_candle_rise
-            || !is_bearish(second)
+            || !is_bearish(&second)
             || second_body > first_body * self.second_candle_body_ratio
             || fallback > self.second_candle_fallback_ratio
-            || !is_bullish(third)
+            || !is_bullish(&third)
             || third_rise < self.third_candle_rise
         {
             return None;

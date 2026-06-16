@@ -15,12 +15,16 @@ use clap::Args;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
+use polars::prelude::DataFrame;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 
 use crate::api::ApiClient;
+use crate::kline_frame::{
+    concat_frames, daily_bars_from_frame, daily_bars_to_frame, dedup_frame_by_symbol_time,
+    frame_symbols, partition_daily_frame_by_exchange_year_month,
+};
 use crate::models::{DailyBar, MarketRequest, DEFAULT_QMT_API_HOST, DEFAULT_TIMEOUT_SECS};
-use crate::normalize::normalize_full_kline_response;
 use crate::tdx_source;
 use crate::utils::{chunked, load_stock_codes_from_file};
 use storage::s3::{
@@ -165,7 +169,7 @@ pub async fn run_sync_daily(args: SyncDailyArgs) -> Result<()> {
     #[derive(Debug)]
     enum WriteJob {
         Batch {
-            bars: Vec<DailyBar>,
+            frame: DataFrame,
         },
         FlushMonth {
             month_idx: usize,
@@ -179,21 +183,19 @@ pub async fn run_sync_daily(args: SyncDailyArgs) -> Result<()> {
     let writer = tokio::spawn(async move {
         let mut uploaded_files: BTreeSet<String> = BTreeSet::new();
         let mut written_rows = 0usize;
-        let mut month_partition_cache: BTreeMap<(String, String, String), Vec<DailyBar>> =
+        let mut month_partition_cache: BTreeMap<(String, String, String), DataFrame> =
             BTreeMap::new();
 
         while let Some(job) = rx.recv().await {
             match job {
-                WriteJob::Batch { bars } => {
-                    for bar in bars {
-                        if bar.time.len() < 7 {
-                            continue;
+                WriteJob::Batch { frame } => {
+                    written_rows += frame.height();
+                    for (key, partition) in partition_daily_frame_by_exchange_year_month(&frame)? {
+                        if let Some(existing) = month_partition_cache.get_mut(&key) {
+                            existing.vstack_mut(&partition)?;
+                        } else {
+                            month_partition_cache.insert(key, partition);
                         }
-                        let year = bar.time[0..4].to_string();
-                        let month = bar.time[5..7].to_string();
-                        let key = (bar.exchange.clone(), year, month);
-                        month_partition_cache.entry(key).or_default().push(bar);
-                        written_rows += 1;
                     }
                 }
                 WriteJob::FlushMonth {
@@ -203,15 +205,15 @@ pub async fn run_sync_daily(args: SyncDailyArgs) -> Result<()> {
                 } => {
                     let upload_result = async {
                         let mut uploaded_now = 0usize;
-                        for ((exchange, year, month), rows) in month_partition_cache {
-                            let deduped_rows = dedup_daily_rows(rows);
+                        for ((exchange, year, month), frame) in month_partition_cache {
+                            let deduped = dedup_frame_by_symbol_time(&frame)?;
                             let key = upload_daily_partition_file_staged(
                                 &s3,
                                 &writer_bucket,
                                 &exchange,
                                 &year,
                                 &month,
-                                &deduped_rows,
+                                &deduped,
                                 &staging_dir,
                             )
                             .await?;
@@ -272,21 +274,19 @@ pub async fn run_sync_daily(args: SyncDailyArgs) -> Result<()> {
                         month_end_api.clone(),
                         "none",
                     );
-                    let rows = match api_clone.fetch_market_batch(&req).await {
-                        Ok(resp) => normalize_full_kline_response(&resp, "1d"),
+                    let mut frames = Vec::new();
+                    match api_clone.fetch_kline_frame(&req).await {
+                        Ok(frame) => frames.push(frame),
                         Err(err) => {
                             eprintln!("[QMT][daily] 批次 {batch_no} 失败，切换 TDX 兜底: {err:#}");
-                            Vec::new()
-                        }
-                    };
-                    let mut batch_bars: Vec<DailyBar> = Vec::new();
-                    for row in &rows {
-                        if let Some(bar) = DailyBar::from_normalized(row) {
-                            batch_bars.push(bar);
                         }
                     }
-                    let found: BTreeSet<String> =
-                        batch_bars.iter().map(|bar| bar.symbol.clone()).collect();
+                    let found = if frames.is_empty() {
+                        BTreeSet::new()
+                    } else {
+                        let merged = concat_frames(frames.clone())?;
+                        frame_symbols(&merged)?
+                    };
                     let missing = chunk
                         .iter()
                         .filter(|code| !found.contains(*code))
@@ -297,16 +297,17 @@ pub async fn run_sync_daily(args: SyncDailyArgs) -> Result<()> {
                             "[QMT][daily] 批次 {batch_no} 缺少 {} 只股票，切换 TDX 兜底",
                             missing.len()
                         );
-                        batch_bars.extend(tdx_source::fetch_daily_bars(
+                        frames.push(tdx_source::fetch_daily_bars_frame(
                             &missing,
                             &month_start_clone,
                             &month_end_clone,
                         )?);
                     }
-                    Ok::<(usize, usize, Vec<DailyBar>), anyhow::Error>((
+                    let merged = concat_frames(frames)?;
+                    Ok::<(usize, usize, DataFrame), anyhow::Error>((
                         batch_no,
-                        batch_bars.len(),
-                        batch_bars,
+                        merged.height(),
+                        merged,
                     ))
                 });
                 next_batch_idx += 1;
@@ -316,10 +317,10 @@ pub async fn run_sync_daily(args: SyncDailyArgs) -> Result<()> {
                 .join_next()
                 .await
                 .ok_or_else(|| anyhow!("fetch 并发任务异常结束"))?;
-            let (batch_no, row_count, bars) =
+            let (batch_no, row_count, frame) =
                 finished.map_err(|e| anyhow!("fetch task join error: {e}"))??;
 
-            tx.send(WriteJob::Batch { bars })
+            tx.send(WriteJob::Batch { frame })
                 .await
                 .map_err(|_| anyhow!("写入队列已关闭"))?;
 
@@ -427,21 +428,19 @@ async fn fetch_daily_bars_with_fallback(
                         month_end_api.clone(),
                         "none",
                     );
-                    let rows = match api_clone.fetch_market_batch(&req).await {
-                        Ok(resp) => normalize_full_kline_response(&resp, "1d"),
+                    let mut frames = Vec::new();
+                    match api_clone.fetch_kline_frame(&req).await {
+                        Ok(frame) => frames.push(frame),
                         Err(err) => {
                             eprintln!("[QMT][daily] 批次 {batch_no} 失败，切换 TDX 兜底: {err:#}");
-                            Vec::new()
-                        }
-                    };
-                    let mut batch_bars: Vec<DailyBar> = Vec::new();
-                    for row in &rows {
-                        if let Some(bar) = DailyBar::from_normalized(row) {
-                            batch_bars.push(bar);
                         }
                     }
-                    let found: BTreeSet<String> =
-                        batch_bars.iter().map(|bar| bar.symbol.clone()).collect();
+                    let found = if frames.is_empty() {
+                        BTreeSet::new()
+                    } else {
+                        let merged = concat_frames(frames.clone())?;
+                        frame_symbols(&merged)?
+                    };
                     let missing = chunk
                         .iter()
                         .filter(|code| !found.contains(*code))
@@ -452,12 +451,14 @@ async fn fetch_daily_bars_with_fallback(
                             "[QMT][daily] 批次 {batch_no} 缺少 {} 只股票，切换 TDX 兜底",
                             missing.len()
                         );
-                        batch_bars.extend(tdx_source::fetch_daily_bars(
+                        frames.push(tdx_source::fetch_daily_bars_frame(
                             &missing,
                             &month_start_clone,
                             &month_end_clone,
                         )?);
                     }
+                    let merged = concat_frames(frames)?;
+                    let batch_bars = daily_bars_from_frame(&merged)?;
                     Ok::<(usize, Vec<DailyBar>), anyhow::Error>((batch_no, batch_bars))
                 });
                 next_batch_idx += 1;
@@ -489,29 +490,19 @@ fn stage_daily_bars_local(
     staging_dir: &std::path::Path,
     bars: Vec<DailyBar>,
 ) -> Result<Vec<(String, PathBuf, usize)>> {
-    let mut groups: BTreeMap<(String, String, String), Vec<DailyBar>> = BTreeMap::new();
-    for bar in bars {
-        if bar.time.len() < 7 {
-            continue;
-        }
-        let year = bar.time[0..4].to_string();
-        let month = bar.time[5..7].to_string();
-        groups
-            .entry((bar.exchange.clone(), year, month))
-            .or_default()
-            .push(bar);
-    }
+    let frame = daily_bars_to_frame(&bars, "daily-sync")?;
+    let groups = partition_daily_frame_by_exchange_year_month(&frame)?;
 
     let mut out = Vec::new();
-    for ((exchange, year, month), rows) in groups {
-        let deduped = dedup_daily_rows(rows);
+    for ((exchange, year, month), frame) in groups {
+        let deduped = dedup_frame_by_symbol_time(&frame)?;
         let key = format!(
             "curated/daily_bars/exchange={exchange}/year={year}/month={month}/data.parquet"
         );
         let path = staging_dir.join(&key);
         write_daily_partition_file_local(&path, &deduped)?;
         validate_parquet_file(&path)?;
-        out.push((key, path, deduped.len()));
+        out.push((key, path, deduped.height()));
     }
     Ok(out)
 }
@@ -522,24 +513,24 @@ async fn upload_daily_partition_file_staged(
     exchange: &str,
     year: &str,
     month: &str,
-    bars: &[DailyBar],
+    frame: &DataFrame,
     staging_dir: &std::path::Path,
 ) -> Result<String> {
     let key =
         format!("curated/daily_bars/exchange={exchange}/year={year}/month={month}/data.parquet");
     let local_path = staging_dir.join(&key);
-    write_daily_partition_file_local(&local_path, bars)?;
+    write_daily_partition_file_local(&local_path, frame)?;
     validate_parquet_file(&local_path)?;
     upload_local_file(s3, bucket, &key, &local_path).await?;
     Ok(key)
 }
 
-fn write_daily_partition_file_local(path: &std::path::Path, bars: &[DailyBar]) -> Result<PathBuf> {
-    let parquet_bytes = daily_to_parquet_bytes(bars)?;
+fn write_daily_partition_file_local(path: &std::path::Path, frame: &DataFrame) -> Result<PathBuf> {
+    let parquet_bytes = daily_to_parquet_bytes(frame)?;
     write_parquet_bytes_local(path, parquet_bytes)
 }
 
-fn daily_to_parquet_bytes(bars: &[DailyBar]) -> Result<Vec<u8>> {
+fn daily_to_parquet_bytes(frame: &DataFrame) -> Result<Vec<u8>> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("symbol", DataType::Utf8, false),
         Field::new("exchange", DataType::Utf8, false),
@@ -568,19 +559,39 @@ fn daily_to_parquet_bytes(bars: &[DailyBar]) -> Result<Vec<u8>> {
     let mut settle = Float64Builder::new();
     let mut open_interest = Float64Builder::new();
 
-    for b in bars {
-        symbol.append_value(&b.symbol);
-        exchange.append_value(&b.exchange);
-        time.append_value(&b.time);
-        open.append_option(b.open);
-        high.append_option(b.high);
-        low.append_option(b.low);
-        close.append_option(b.close);
-        volume.append_option(b.volume);
-        amount.append_option(b.amount);
-        adj_factor.append_option(b.adj_factor);
-        settle.append_option(b.settle);
-        open_interest.append_option(b.open_interest);
+    let symbols = frame.column("symbol")?.str()?;
+    let exchanges = frame.column("exchange")?.str()?;
+    let times = frame.column("time")?.str()?;
+    let open_values = frame.column("open")?.f64()?;
+    let high_values = frame.column("high")?.f64()?;
+    let low_values = frame.column("low")?.f64()?;
+    let close_values = frame.column("close")?.f64()?;
+    let volume_values = frame.column("volume")?.f64()?;
+    let amount_values = frame.column("amount")?.f64()?;
+    let factor_values = frame.column("factor")?.f64()?;
+
+    for idx in 0..frame.height() {
+        let Some(symbol_value) = symbols.get(idx) else {
+            continue;
+        };
+        let Some(exchange_value) = exchanges.get(idx) else {
+            continue;
+        };
+        let Some(time_value) = times.get(idx) else {
+            continue;
+        };
+        symbol.append_value(symbol_value);
+        exchange.append_value(exchange_value);
+        time.append_value(time_value);
+        open.append_option(open_values.get(idx));
+        high.append_option(high_values.get(idx));
+        low.append_option(low_values.get(idx));
+        close.append_option(close_values.get(idx));
+        volume.append_option(volume_values.get(idx));
+        amount.append_option(amount_values.get(idx));
+        adj_factor.append_option(factor_values.get(idx));
+        settle.append_null();
+        open_interest.append_null();
     }
 
     let batch = RecordBatch::try_new(
@@ -617,21 +628,6 @@ fn daily_to_parquet_bytes(bars: &[DailyBar]) -> Result<Vec<u8>> {
         return Err(anyhow!("empty parquet bytes"));
     }
     Ok(bytes)
-}
-
-fn dedup_daily_rows(rows: Vec<DailyBar>) -> Vec<DailyBar> {
-    let mut keyed: BTreeMap<(String, String), DailyBar> = BTreeMap::new();
-    for row in rows {
-        keyed.insert((row.symbol.clone(), row.time.clone()), row);
-    }
-    let mut out: Vec<DailyBar> = keyed.into_values().collect();
-    out.sort_by(|a, b| {
-        a.symbol
-            .cmp(&b.symbol)
-            .then(a.time.cmp(&b.time))
-            .then(a.exchange.cmp(&b.exchange))
-    });
-    out
 }
 
 fn read_watermark_day(path: &PathBuf) -> Result<Option<NaiveDate>> {
@@ -734,10 +730,12 @@ fn month_windows(start_compact: &str, end_compact: &str) -> Result<Vec<(String, 
 #[cfg(test)]
 mod tests {
     use super::{
-        dedup_daily_rows, fetch_daily_bars_with_fallback, stage_daily_bars_local,
-        write_daily_partition_file_local,
+        fetch_daily_bars_with_fallback, stage_daily_bars_local, write_daily_partition_file_local,
     };
     use crate::api::ApiClient;
+    use crate::kline_frame::{
+        daily_bars_from_frame, daily_bars_to_frame, dedup_frame_by_symbol_time,
+    };
     use crate::models::{DailyBar, DEFAULT_QMT_API_HOST, DEFAULT_TIMEOUT_SECS};
     use anyhow::Result;
     use parquet::file::reader::{FileReader, SerializedFileReader};
@@ -756,7 +754,10 @@ mod tests {
             daily_bar("600000.SH", "SH", "2026-05-20", 8.0),
         ];
 
-        let deduped = dedup_daily_rows(rows);
+        let frame = daily_bars_to_frame(&rows, "test").expect("daily frame");
+        let deduped =
+            daily_bars_from_frame(&dedup_frame_by_symbol_time(&frame).expect("dedup frame"))
+                .expect("daily rows");
 
         assert_eq!(deduped.len(), 3);
         assert_eq!(deduped[0].symbol, "000001.SZ");
@@ -771,13 +772,14 @@ mod tests {
         let staging_dir = temp_dir("sync-daily");
         let relative = "curated/daily_bars/exchange=SZ/year=2026/month=05/data.parquet";
         let local_path = staging_dir.join(relative);
-        let rows = dedup_daily_rows(vec![
+        let rows = vec![
             daily_bar("000001.SZ", "SZ", "2026-05-20", 10.0),
             daily_bar("000001.SZ", "SZ", "2026-05-20", 11.0),
             daily_bar("000002.SZ", "SZ", "2026-05-21", 20.0),
-        ]);
+        ];
+        let frame = dedup_frame_by_symbol_time(&daily_bars_to_frame(&rows, "test")?)?;
 
-        let written = write_daily_partition_file_local(&local_path, &rows)?;
+        let written = write_daily_partition_file_local(&local_path, &frame)?;
         assert_eq!(written, local_path);
         assert!(written.exists());
 
@@ -824,7 +826,9 @@ mod tests {
             let key = format!(
                 "curated/daily_bars/exchange={exchange}/year={year}/month={month}/data.parquet"
             );
-            let deduped = dedup_daily_rows(rows);
+            let deduped = daily_bars_from_frame(&dedup_frame_by_symbol_time(
+                &daily_bars_to_frame(&rows, "test")?,
+            )?)?;
             expected_groups.insert(key, rows_from_daily_bars(&deduped));
         }
 

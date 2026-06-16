@@ -2,13 +2,14 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use chrono::{TimeZone, Utc};
+use polars::prelude::DataFrame;
 use qmt::common::{AdjustType, QuotePeriod, Status as QmtStatus};
 use qmt::data::{KlineHistoryRequest, SectorListResponse};
 use qmt::QmtClient;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use tonic::transport::Endpoint;
 
+use crate::kline_frame::qmt_kline_response_to_frame;
 use crate::models::MarketRequest;
 
 #[derive(Debug, Clone)]
@@ -29,7 +30,15 @@ impl ApiClient {
         Ok(Self { client })
     }
 
-    pub async fn fetch_market_batch(&self, req: &MarketRequest) -> Result<Value> {
+    pub async fn fetch_kline_frame(&self, req: &MarketRequest) -> Result<DataFrame> {
+        let response = self.fetch_kline_history(req).await?;
+        qmt_kline_response_to_frame(&req.period, response, "qmt")
+    }
+
+    async fn fetch_kline_history(
+        &self,
+        req: &MarketRequest,
+    ) -> Result<qmt::data::KlineHistoryResponse> {
         let request = KlineHistoryRequest {
             symbols: req.stock_codes.clone(),
             period: map_quote_period(&req.period)? as i32,
@@ -59,7 +68,7 @@ impl ApiClient {
             .into_inner();
 
         ensure_status_ok(response.status.as_ref(), "GetKlineHistory")?;
-        Ok(kline_response_to_json(&req.period, response))
+        Ok(response)
     }
 
     pub async fn fetch_sectors(&self) -> Result<Value> {
@@ -141,33 +150,6 @@ fn map_adjust_type(adjust_type: &str) -> Result<AdjustType> {
     }
 }
 
-fn kline_response_to_json(period: &str, response: qmt::data::KlineHistoryResponse) -> Value {
-    let mut root = Map::new();
-    for item in response.items {
-        let bars = item
-            .bars
-            .into_iter()
-            .map(|bar| {
-                json!({
-                    "time": format_time_ms(period, bar.time_ms),
-                    "open": bar.open,
-                    "high": bar.high,
-                    "low": bar.low,
-                    "close": bar.close,
-                    "volume": bar.volume,
-                    "amount": bar.amount,
-                    "settle": bar.settle,
-                    "openInterest": bar.open_interest,
-                    "preClose": bar.pre_close,
-                    "suspendFlag": bar.suspend_flag,
-                })
-            })
-            .collect::<Vec<_>>();
-        root.insert(item.symbol, Value::Array(bars));
-    }
-    Value::Object(root)
-}
-
 fn sector_response_to_json(response: SectorListResponse) -> Value {
     Value::Array(
         response
@@ -181,22 +163,6 @@ fn sector_response_to_json(response: SectorListResponse) -> Value {
             })
             .collect(),
     )
-}
-
-fn format_time_ms(period: &str, time_ms: i64) -> String {
-    if let Some(dt) = Utc.timestamp_millis_opt(time_ms).single() {
-        let local = dt.with_timezone(
-            &chrono::FixedOffset::east_opt(8 * 3600).expect("valid china timezone offset"),
-        );
-        match period.trim().to_ascii_lowercase().as_str() {
-            "1d" | "1w" | "1mon" | "1mo" | "1q" | "1hy" | "1y" => {
-                local.format("%Y-%m-%d").to_string()
-            }
-            _ => local.format("%Y-%m-%d %H:%M:%S").to_string(),
-        }
-    } else {
-        time_ms.to_string()
-    }
 }
 
 fn is_hsba_a_share(code: &str) -> bool {

@@ -37,8 +37,8 @@ impl PatternDetector for TrendStartDetector {
         if idx < 1 {
             return None;
         }
-        let today = &series.bars[idx];
-        let yesterday = &series.bars[idx - 1];
+        let today = series.bar(idx)?;
+        let yesterday = series.bar(idx - 1)?;
         let dif_today = indicators.dif[idx]?;
         let dif_yesterday = indicators.dif[idx - 1]?;
         let dea_today = indicators.dea[idx]?;
@@ -52,7 +52,7 @@ impl PatternDetector for TrendStartDetector {
         let macd_cross = dif_today > 0.0 && dif_yesterday <= dea_yesterday && dif_today > dea_today;
         let boll_cross = yesterday.close < boll_yesterday && today.close > boll_today;
         let volume_ok = volume_ratio > self.volume_ratio;
-        if macd_cross && boll_cross && is_bullish(today) && today.close > ma5 && volume_ok {
+        if macd_cross && boll_cross && is_bullish(&today) && today.close > ma5 && volume_ok {
             return Some(signal(
                 self.id(),
                 series,

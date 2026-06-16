@@ -43,18 +43,18 @@ impl PatternDetector for MorningStarDetector {
         if idx < 2 {
             return None;
         }
-        let first_candle = &series.bars[idx - 2];
-        let second_candle = &series.bars[idx - 1];
-        let third_candle = &series.bars[idx];
+        let first_candle = series.bar(idx - 2)?;
+        let second_candle = series.bar(idx - 1)?;
+        let third_candle = series.bar(idx)?;
         let ma5 = indicators.ma5[idx]?;
 
-        let first_body = body_ratio(first_candle);
-        let second_body = body_ratio(second_candle);
+        let first_body = body_ratio(&first_candle);
+        let second_body = body_ratio(&second_candle);
         let third_change = (third_candle.close - third_candle.open) / third_candle.open.max(1e-6);
-        if !is_bullish(third_candle)
+        if !is_bullish(&third_candle)
             || third_change <= 0.05
             || third_candle.close <= ma5
-            || !is_bearish(first_candle)
+            || !is_bearish(&first_candle)
             || first_body < self.first_body_threshold
             || second_body > first_body * self.small_body_ratio
         {

@@ -25,62 +25,61 @@ impl PatternDetector for TrendAccelerationInflectionDetector {
     }
 
     fn detect(&self, series: &BarSeries, indicators: &SeriesIndicators) -> Option<PatternSignal> {
-        let bars = &series.bars;
-        if bars.len() < 50 {
+        if series.len() < 50 {
             return None;
         }
-        let closes: Vec<f64> = bars[bars.len() - 20..]
-            .iter()
-            .map(|bar| bar.close)
+        let closes: Vec<f64> = (series.len() - 20..series.len())
+            .filter_map(|idx| series.bar(idx).map(|bar| bar.close))
             .collect();
         let (slope, r2) = linear_regression_metrics(&closes)?;
         if slope <= 0.0 || r2 < 0.5 {
             return None;
         }
-        let latest_idx = bars.len() - 1;
-        for surge_idx in (bars.len().saturating_sub(5)..=latest_idx).rev() {
-            let change = pct_change(bars, surge_idx)?;
+        let latest_idx = series.len() - 1;
+        for surge_idx in (series.len().saturating_sub(5)..=latest_idx).rev() {
+            let change = pct_change(series, surge_idx)?;
             let vol_ma = indicators.volume_ma5[surge_idx]?;
-            if change < 0.08 || bars[surge_idx].volume < vol_ma * 2.0 {
+            let surge_bar = series.bar(surge_idx)?;
+            if change < 0.08 || surge_bar.volume < vol_ma * 2.0 {
                 continue;
             }
             let low_start = surge_idx.saturating_sub(40);
-            let lowest = bars[low_start..=surge_idx]
-                .iter()
-                .map(|bar| bar.low)
-                .fold(f64::INFINITY, f64::min);
+            let mut lowest = f64::INFINITY;
+            for idx in low_start..=surge_idx {
+                lowest = lowest.min(series.bar(idx)?.low);
+            }
             let start_price = if surge_idx > 0 {
-                bars[surge_idx - 1].close
+                series.bar(surge_idx - 1)?.close
             } else {
-                bars[surge_idx].open
+                surge_bar.open
             };
             let distance = (start_price - lowest) / lowest.max(1e-6);
             if distance > 0.15 {
                 continue;
             }
-            let support_price = bars[surge_idx].open;
-            if bars[surge_idx..=latest_idx]
-                .iter()
-                .map(|bar| bar.low)
-                .fold(f64::INFINITY, f64::min)
-                < support_price
-            {
+            let support_price = surge_bar.open;
+            let mut min_low = f64::INFINITY;
+            for idx in surge_idx..=latest_idx {
+                min_low = min_low.min(series.bar(idx)?.low);
+            }
+            if min_low < support_price {
                 continue;
             }
+            let latest_bar = series.bar(latest_idx)?;
             return Some(signal(
                 self.id(),
                 series,
-                bars[latest_idx].time,
+                latest_bar.time,
                 0.8,
                 &["trend", "acceleration"],
                 "股价处于显著上升趋势中，近端出现放量长阳加速且回调未破启动支撑。",
                 json!({
                     "trend_slope": slope,
                     "trend_r2": r2,
-                    "surge_date": bars[surge_idx].time.format("%Y-%m-%d").to_string(),
+                    "surge_date": surge_bar.time.format("%Y-%m-%d").to_string(),
                     "distance_from_low": distance,
                     "support_price": support_price,
-                    "volume_ratio": bars[surge_idx].volume / vol_ma,
+                    "volume_ratio": surge_bar.volume / vol_ma,
                 }),
             ));
         }

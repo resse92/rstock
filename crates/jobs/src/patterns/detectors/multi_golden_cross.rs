@@ -70,7 +70,7 @@ impl PatternDetector for MultiGoldenCrossDetector {
         let (ma_day, kdj_day, macd_day) = (ma_cross_day?, kdj_cross_day?, macd_cross_day?);
         let min_day = ma_day.min(kdj_day).min(macd_day);
         let max_day = ma_day.max(kdj_day).max(macd_day);
-        let latest = &series.bars[idx];
+        let latest = series.bar(idx)?;
         let ma5 = indicators.ma5[idx]?;
         let ma20 = indicators.ma20[idx]?;
         let k = indicators.k[idx]?;
@@ -97,11 +97,11 @@ impl PatternDetector for MultiGoldenCrossDetector {
                 &["golden-cross", "resonance"],
                 "均线、KDJ、MACD 在短周期内形成多金叉共振。",
                 json!({
-                    "key_date": series.bars[min_day].time.format("%Y-%m-%d").to_string(),
+                    "key_date": series.bar(min_day)?.time.format("%Y-%m-%d").to_string(),
                     "key_date_type": "多金叉共振日",
-                    "ma_cross_date": series.bars[ma_day].time.format("%Y-%m-%d").to_string(),
-                    "kdj_cross_date": series.bars[kdj_day].time.format("%Y-%m-%d").to_string(),
-                    "macd_cross_date": series.bars[macd_day].time.format("%Y-%m-%d").to_string(),
+                    "ma_cross_date": series.bar(ma_day)?.time.format("%Y-%m-%d").to_string(),
+                    "kdj_cross_date": series.bar(kdj_day)?.time.format("%Y-%m-%d").to_string(),
+                    "macd_cross_date": series.bar(macd_day)?.time.format("%Y-%m-%d").to_string(),
                     "max_gap_days": max_gap,
                     "ma5": ma5,
                     "ma20": ma20,

@@ -25,67 +25,65 @@ impl PatternDetector for StrongWashWeakToStrongDetector {
     }
 
     fn detect(&self, series: &BarSeries, indicators: &SeriesIndicators) -> Option<PatternSignal> {
-        let bars = &series.bars;
-        if bars.len() < 10 {
+        if series.len() < 10 {
             return None;
         }
-        let end = bars.len();
+        let end = series.len();
         let latest_idx = end - 1;
         for big_idx in (end.saturating_sub(6)..end.saturating_sub(2)).rev() {
-            let big_change = pct_change(bars, big_idx)?;
+            let big_change = pct_change(series, big_idx)?;
             let big_vol_ma = indicators.volume_ma5[big_idx]?;
-            if big_change < 0.08
-                || !is_bullish(&bars[big_idx])
-                || bars[big_idx].volume < big_vol_ma * 1.5
-            {
+            let big_bar = series.bar(big_idx)?;
+            if big_change < 0.08 || !is_bullish(&big_bar) || big_bar.volume < big_vol_ma * 1.5 {
                 continue;
             }
             let wash_idx = big_idx + 1;
-            if wash_idx >= end
-                || !is_bearish(&bars[wash_idx])
-                || bars[wash_idx].volume < bars[big_idx].volume * 1.2
-            {
+            let wash_bar = series.bar(wash_idx)?;
+            if wash_idx >= end || !is_bearish(&wash_bar) || wash_bar.volume < big_bar.volume * 1.2 {
                 continue;
             }
             let reversal_end = (wash_idx + 3).min(end - 1);
             for reversal_idx in wash_idx + 1..=reversal_end {
-                if !is_bullish(&bars[reversal_idx]) {
+                let reversal_bar = series.bar(reversal_idx)?;
+                if !is_bullish(&reversal_bar) {
                     continue;
                 }
-                if bars[reversal_idx].close <= bars[big_idx].close
-                    && bars[reversal_idx].close <= bars[wash_idx].open
-                {
+                if reversal_bar.close <= big_bar.close && reversal_bar.close <= wash_bar.open {
                     continue;
                 }
                 if latest_idx.saturating_sub(reversal_idx) > 5 {
                     continue;
                 }
                 if reversal_idx < latest_idx
-                    && bars[reversal_idx + 1..end]
-                        .iter()
-                        .any(|bar| bar.close <= bars[big_idx].close)
+                    && (reversal_idx + 1..end).any(|idx| {
+                        series
+                            .bar(idx)
+                            .is_some_and(|bar| bar.close <= big_bar.close)
+                    })
                 {
                     continue;
                 }
-                if bars[reversal_idx..end]
-                    .iter()
-                    .any(|bar| bar.close <= bars[big_idx].close)
-                {
+                if (reversal_idx..end).any(|idx| {
+                    series
+                        .bar(idx)
+                        .is_some_and(|bar| bar.close <= big_bar.close)
+                }) {
                     continue;
                 }
+                let latest_bar = series.bar(end - 1)?;
                 return Some(signal(
                     self.id(),
                     series,
-                    bars[end - 1].time,
+                    latest_bar.time,
                     0.77,
                     &["wash", "reversal"],
                     "先出现放量大阳线，随后洗盘阴线，再以反包阳线完成弱转强。",
                     json!({
-                        "big_candle_date": bars[big_idx].time.format("%Y-%m-%d").to_string(),
-                        "wash_date": bars[wash_idx].time.format("%Y-%m-%d").to_string(),
-                        "reversal_date": bars[reversal_idx].time.format("%Y-%m-%d").to_string(),
-                        "big_candle_volume_ratio": bars[big_idx].volume / big_vol_ma.max(1e-6),
-                        "wash_volume_ratio": bars[wash_idx].volume / bars[big_idx].volume.max(1e-6),
+                        "big_candle_date": big_bar.time.format("%Y-%m-%d").to_string(),
+                        "wash_date": wash_bar.time.format("%Y-%m-%d").to_string(),
+                        "reversal_date": reversal_bar.time.format("%Y-%m-%d").to_string(),
+                        "big_candle_volume_ratio": big_bar.volume / big_vol_ma.max(1e-6),
+                        "wash_volume_ratio": wash_bar.volume / big_bar.volume.max(1e-6),
                         "days_after_reversal": latest_idx - reversal_idx,
                     }),
                 ));

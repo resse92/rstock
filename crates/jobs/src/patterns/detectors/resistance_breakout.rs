@@ -47,13 +47,12 @@ impl PatternDetector for ResistanceBreakoutDetector {
     }
 
     fn detect(&self, series: &BarSeries, indicators: &SeriesIndicators) -> Option<PatternSignal> {
-        let bars = &series.bars;
-        if bars.len() <= self.breakout_lookback + 1 {
+        if series.len() <= self.breakout_lookback + 1 {
             return None;
         }
 
         let latest_idx = latest_idx(series);
-        let latest = &bars[latest_idx];
+        let latest = series.bar(latest_idx)?;
         let ma5 = indicators.ma5[latest_idx]?;
         let ma10 = indicators.ma10[latest_idx]?;
         let ma20 = indicators.ma20[latest_idx]?;
@@ -64,19 +63,20 @@ impl PatternDetector for ResistanceBreakoutDetector {
         let start_search = latest_idx.saturating_sub(self.max_search_days);
         for idx in (start_search..=latest_idx).rev() {
             let prev_close = if idx > 0 {
-                bars[idx - 1].close
+                series.bar(idx - 1)?.close
             } else {
                 continue;
             };
-            let change_pct = (bars[idx].close - prev_close) / prev_close.max(1e-6);
+            let current = series.bar(idx)?;
+            let change_pct = (current.close - prev_close) / prev_close.max(1e-6);
             let resistance_start = idx.saturating_sub(self.breakout_lookback);
             if idx <= resistance_start + self.min_resistance_gap {
                 continue;
             }
-            let resistance = bars[resistance_start..idx]
-                .iter()
-                .map(|bar| bar.high)
-                .fold(f64::NEG_INFINITY, f64::max);
+            let mut resistance = f64::NEG_INFINITY;
+            for probe in resistance_start..idx {
+                resistance = resistance.max(series.bar(probe)?.high);
+            }
             let vol_ma = match self.volume_ma_period {
                 5 => indicators.volume_ma5[idx],
                 10 => indicators.volume_ma10[idx],
@@ -84,40 +84,39 @@ impl PatternDetector for ResistanceBreakoutDetector {
                 _ => indicators.volume_ma5[idx],
             }?;
             if change_pct < self.min_change_pct
-                || bars[idx].close < resistance * (1.0 + self.breakout_ratio)
-                || bars[idx].volume < vol_ma * self.volume_ratio
+                || current.close < resistance * (1.0 + self.breakout_ratio)
+                || current.volume < vol_ma * self.volume_ratio
             {
                 continue;
             }
-            let max_before_idx = bars[resistance_start..idx]
-                .iter()
-                .enumerate()
-                .max_by(|a, b| a.1.high.partial_cmp(&b.1.high).unwrap())
-                .map(|(pos, _)| pos + resistance_start)?;
+            let mut max_before_idx = None;
+            let mut max_before_high = f64::NEG_INFINITY;
+            for probe in resistance_start..idx {
+                let high = series.bar(probe)?.high;
+                if high > max_before_high {
+                    max_before_high = high;
+                    max_before_idx = Some(probe);
+                }
+            }
+            let max_before_idx = max_before_idx?;
             if idx - max_before_idx < self.min_resistance_gap {
                 continue;
             }
             let support = resistance * 0.98;
-            let hold_lows = if idx < latest_idx {
-                &bars[idx + 1..=latest_idx]
-            } else {
-                &[][..]
-            };
-            let min_low_after_breakout = hold_lows
-                .iter()
-                .map(|bar| bar.low)
-                .fold(f64::INFINITY, f64::min);
-            if hold_lows
-                .first()
-                .is_some_and(|_| min_low_after_breakout < support)
-            {
+            let mut min_low_after_breakout = f64::INFINITY;
+            let mut has_hold = false;
+            for probe in idx.saturating_add(1)..=latest_idx {
+                has_hold = true;
+                min_low_after_breakout = min_low_after_breakout.min(series.bar(probe)?.low);
+            }
+            if has_hold && min_low_after_breakout < support {
                 continue;
             }
-            if !is_bullish(&bars[idx]) || latest.close <= ma5 {
+            if !is_bullish(&current) || latest.close <= ma5 {
                 continue;
             }
             let days_since_breakout = latest_idx - idx;
-            let volume_expand = bars[idx].volume / vol_ma.max(1e-6);
+            let volume_expand = current.volume / vol_ma.max(1e-6);
             let reasons = if days_since_breakout > 0 {
                 vec![
                     format!(
@@ -152,14 +151,14 @@ impl PatternDetector for ResistanceBreakoutDetector {
                 &["breakout", "trend"],
                 "近阶段放量长阳突破阻力位，突破后回踩未失守。",
                 json!({
-                    "breakout_date": bars[idx].time.format("%Y-%m-%d").to_string(),
-                    "key_date": bars[idx].time.format("%Y-%m-%d").to_string(),
+                    "breakout_date": current.time.format("%Y-%m-%d").to_string(),
+                    "key_date": current.time.format("%Y-%m-%d").to_string(),
                     "key_date_type": "阻力位突破日",
                     "price": latest.close,
                     "resistance": resistance,
                     "support": support,
                     "breakout_change_pct": change_pct,
-                    "breakout_ratio": (bars[idx].close - resistance) / resistance.max(1e-6),
+                    "breakout_ratio": (current.close - resistance) / resistance.max(1e-6),
                     "days_since_breakout": days_since_breakout,
                     "volume_ratio": volume_expand,
                     "ma5": ma5,

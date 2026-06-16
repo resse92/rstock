@@ -12,11 +12,12 @@ use clap::Args;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
+use polars::prelude::{Column, DataFrame, IdxCa};
 use tokio::task::JoinSet;
 
 use crate::api::ApiClient;
-use crate::models::{MarketRequest, MinuteBar1m, DEFAULT_QMT_API_HOST, DEFAULT_TIMEOUT_SECS};
-use crate::normalize::normalize_full_kline_response;
+use crate::kline_frame::{concat_frames, frame_symbols, partition_frame_by_trade_date_exchange};
+use crate::models::{MarketRequest, DEFAULT_QMT_API_HOST, DEFAULT_TIMEOUT_SECS};
 use crate::tdx_source;
 use crate::utils::{chunked, load_stock_codes_from_file};
 use storage::s3::{
@@ -112,16 +113,15 @@ pub async fn run_sync_minute(args: SyncMinuteArgs) -> Result<()> {
 
     let mut uploaded = 0usize;
     let mut rows = 0usize;
-    for ((trade_date, exchange), mut bars) in grouped {
-        bars.sort_by(|a, b| a.symbol.cmp(&b.symbol).then(a.time.cmp(&b.time)));
+    for ((trade_date, exchange), frame) in grouped {
         let key = minute_partition_key(&trade_date, &exchange);
         let local_path =
-            write_minute_partition_file_local(&args.staging_dir, &trade_date, &exchange, &bars)?;
+            write_minute_partition_file_local(&args.staging_dir, &trade_date, &exchange, &frame)?;
         validate_parquet_file(&local_path)?;
         upload_local_file(&s3, &s3_settings.bucket, &key, &local_path).await?;
-        rows += bars.len();
+        rows += frame.height();
         uploaded += 1;
-        println!("[PUT] {key} rows={}", bars.len());
+        println!("[PUT] {key} rows={}", frame.height());
     }
 
     println!(
@@ -149,13 +149,13 @@ async fn fetch_minute_grouped_bars(
     end_date: &str,
     chunk_size: usize,
     fetch_concurrency: usize,
-) -> Result<BTreeMap<(String, String), Vec<MinuteBar1m>>> {
+) -> Result<BTreeMap<(String, String), DataFrame>> {
     let start_compact = compact_date(start_date)?;
     let end_compact = compact_date(end_date)?;
     let start_api = minute_start_time(&start_compact);
     let end_api = minute_end_time(&end_compact);
     let batches = chunked(stock_codes, chunk_size);
-    let mut grouped: BTreeMap<(String, String), Vec<MinuteBar1m>> = BTreeMap::new();
+    let mut grouped: BTreeMap<(String, String), DataFrame> = BTreeMap::new();
     let mut join_set = JoinSet::new();
     let mut next_batch_idx = 0usize;
 
@@ -175,11 +175,11 @@ async fn fetch_minute_grouped_bars(
                     end_api.clone(),
                     "none",
                 );
-                let rows = match api_clone.fetch_market_batch(&req).await {
-                    Ok(resp) => normalize_full_kline_response(&resp, "1m"),
+                let mut frames = Vec::new();
+                match api_clone.fetch_kline_frame(&req).await {
+                    Ok(frame) => frames.push(frame),
                     Err(err) => {
                         eprintln!("[QMT][minute] 批次失败，切换 TDX 兜底: {err:#}");
-                        let mut recovered = Vec::new();
                         for code in &chunk {
                             let single_req = MarketRequest::new(
                                 vec![code.clone()],
@@ -188,10 +188,8 @@ async fn fetch_minute_grouped_bars(
                                 end_api.clone(),
                                 "none",
                             );
-                            match api_clone.fetch_market_batch(&single_req).await {
-                                Ok(resp) => {
-                                    recovered.extend(normalize_full_kline_response(&resp, "1m"));
-                                }
+                            match api_clone.fetch_kline_frame(&single_req).await {
+                                Ok(frame) => frames.push(frame),
                                 Err(single_err) => {
                                     eprintln!(
                                         "[QMT][minute] 单票 {} 请求失败，留给 TDX 兜底: {single_err:#}",
@@ -200,14 +198,14 @@ async fn fetch_minute_grouped_bars(
                                 }
                             }
                         }
-                        recovered
                     }
                 };
-                let mut bars = rows
-                    .iter()
-                    .filter_map(MinuteBar1m::from_normalized)
-                    .collect::<Vec<_>>();
-                let found: BTreeSet<String> = bars.iter().map(|bar| bar.symbol.clone()).collect();
+                let found = if frames.is_empty() {
+                    BTreeSet::new()
+                } else {
+                    let merged = concat_frames(frames.clone())?;
+                    frame_symbols(&merged)?
+                };
                 let missing = chunk
                     .iter()
                     .filter(|code| !found.contains(*code))
@@ -218,27 +216,25 @@ async fn fetch_minute_grouped_bars(
                         "[QMT][minute] 批次缺少 {} 只股票，切换 TDX 兜底",
                         missing.len()
                     );
-                    bars.extend(tdx_source::fetch_minute_bars(&missing, &start, &end)?);
+                    frames.push(tdx_source::fetch_minute_bars_frame(&missing, &start, &end)?);
                 }
-                Ok::<Vec<MinuteBar1m>, anyhow::Error>(bars)
+                let merged = concat_frames(frames)?;
+                Ok::<DataFrame, anyhow::Error>(merged)
             });
             next_batch_idx += 1;
         }
 
-        let bars = join_set
+        let frame = join_set
             .join_next()
             .await
             .ok_or_else(|| anyhow!("fetch 并发任务异常结束"))?
             .map_err(|e| anyhow!("fetch task join error: {e}"))??;
-        for bar in bars {
-            if bar.time.len() < 10 {
-                continue;
+        for (key, partition) in partition_frame_by_trade_date_exchange(&frame)? {
+            if let Some(existing) = grouped.get_mut(&key) {
+                existing.vstack_mut(&partition)?;
+            } else {
+                grouped.insert(key, partition);
             }
-            let trade_date = bar.time[0..10].to_string();
-            grouped
-                .entry((trade_date, bar.exchange.clone()))
-                .or_default()
-                .push(bar);
         }
     }
 
@@ -253,14 +249,15 @@ fn write_minute_partition_file_local(
     staging_dir: &std::path::Path,
     trade_date: &str,
     exchange: &str,
-    bars: &[MinuteBar1m],
+    frame: &DataFrame,
 ) -> Result<PathBuf> {
     let key = minute_partition_key(trade_date, exchange);
     let local_path = staging_dir.join(key);
-    write_parquet_bytes_local(&local_path, minute_to_parquet_bytes(bars)?)
+    write_parquet_bytes_local(&local_path, minute_to_parquet_bytes(frame)?)
 }
 
-fn minute_to_parquet_bytes(rows: &[MinuteBar1m]) -> Result<Vec<u8>> {
+fn minute_to_parquet_bytes(frame: &DataFrame) -> Result<Vec<u8>> {
+    let frame = sort_frame_by_columns(frame, &["symbol", "time"])?;
     let schema = Arc::new(Schema::new(vec![
         Field::new("symbol", DataType::Utf8, false),
         Field::new("exchange", DataType::Utf8, false),
@@ -289,19 +286,44 @@ fn minute_to_parquet_bytes(rows: &[MinuteBar1m]) -> Result<Vec<u8>> {
     let mut turn_over_rate = Float64Builder::new();
     let mut factor = Float64Builder::new();
 
-    for row in rows {
-        symbol.append_value(&row.symbol);
-        exchange.append_value(&row.exchange);
-        trade_date.append_value(minute_trade_date(&row.time));
-        time.append_value(&row.time);
-        open.append_option(row.open);
-        high.append_option(row.high);
-        low.append_option(row.low);
-        close.append_option(row.close);
-        volume.append_option(row.volume);
-        turn_over.append_option(row.turn_over);
-        turn_over_rate.append_option(row.turn_over_rate);
-        factor.append_value(row.factor);
+    let symbols = frame.column("symbol")?.str()?;
+    let exchanges = frame.column("exchange")?.str()?;
+    let trade_dates = frame.column("trade_date")?.str()?;
+    let times = frame.column("time")?.str()?;
+    let open_values = frame.column("open")?.f64()?;
+    let high_values = frame.column("high")?.f64()?;
+    let low_values = frame.column("low")?.f64()?;
+    let close_values = frame.column("close")?.f64()?;
+    let volume_values = frame.column("volume")?.f64()?;
+    let amount_values = frame.column("amount")?.f64()?;
+    let turnover_rate_values = frame.column("turnover_rate")?.f64()?;
+    let factor_values = frame.column("factor")?.f64()?;
+
+    for idx in 0..frame.height() {
+        let Some(symbol_value) = symbols.get(idx) else {
+            continue;
+        };
+        let Some(exchange_value) = exchanges.get(idx) else {
+            continue;
+        };
+        let Some(trade_date_value) = trade_dates.get(idx) else {
+            continue;
+        };
+        let Some(time_value) = times.get(idx) else {
+            continue;
+        };
+        symbol.append_value(symbol_value);
+        exchange.append_value(exchange_value);
+        trade_date.append_value(trade_date_value);
+        time.append_value(time_value);
+        open.append_option(open_values.get(idx));
+        high.append_option(high_values.get(idx));
+        low.append_option(low_values.get(idx));
+        close.append_option(close_values.get(idx));
+        volume.append_option(volume_values.get(idx));
+        turn_over.append_option(amount_values.get(idx));
+        turn_over_rate.append_option(turnover_rate_values.get(idx));
+        factor.append_option(factor_values.get(idx));
     }
 
     let batch = RecordBatch::try_new(
@@ -333,6 +355,64 @@ fn minute_to_parquet_bytes(rows: &[MinuteBar1m]) -> Result<Vec<u8>> {
     Ok(cursor.into_inner())
 }
 
+fn sort_frame_by_columns(frame: &DataFrame, columns: &[&str]) -> Result<DataFrame> {
+    let mut order = (0..frame.height()).collect::<Vec<_>>();
+    order.sort_by(|&left, &right| compare_frame_rows(frame, left, right, columns));
+    let idx = IdxCa::from_vec(
+        "idx".into(),
+        order.into_iter().map(|idx| idx as u32).collect(),
+    );
+    frame.take(&idx).map_err(Into::into)
+}
+
+fn compare_frame_rows(
+    frame: &DataFrame,
+    left: usize,
+    right: usize,
+    columns: &[&str],
+) -> std::cmp::Ordering {
+    for column in columns {
+        let Some(series) = frame
+            .get_columns()
+            .iter()
+            .find(|item| item.name().as_str() == *column)
+        else {
+            continue;
+        };
+        let ordering = match series {
+            Column::Series(s) => compare_series_values(s, left, right),
+            _ => std::cmp::Ordering::Equal,
+        };
+        if ordering != std::cmp::Ordering::Equal {
+            return ordering;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+fn compare_series_values(
+    series: &polars::prelude::Series,
+    left: usize,
+    right: usize,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    match series.dtype() {
+        polars::prelude::DataType::String => {
+            let ca = series.str().ok();
+            ca.and_then(|values| Some(values.get(left).cmp(&values.get(right))))
+                .unwrap_or(Ordering::Equal)
+        }
+        polars::prelude::DataType::Float64 => {
+            let ca = series.f64().ok();
+            ca.and_then(|values| values.get(left).partial_cmp(&values.get(right)))
+                .unwrap_or(Ordering::Equal)
+        }
+        _ => Ordering::Equal,
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 fn minute_trade_date(time: &str) -> &str {
     time.get(0..10).unwrap_or(time)
 }
@@ -368,6 +448,7 @@ mod tests {
         write_minute_partition_file_local,
     };
     use crate::api::ApiClient;
+    use crate::kline_frame::{minute_bars_from_frame, minute_bars_to_frame};
     use crate::models::MinuteBar1m;
     use anyhow::Result;
     use parquet::file::reader::{FileReader, SerializedFileReader};
@@ -386,9 +467,10 @@ mod tests {
             minute_bar("000001.SZ", "SZ", "2026-05-24 09:32:00", 10.2),
             minute_bar("000333.SZ", "SZ", "2026-05-24 14:59:00", 58.8),
         ];
+        let frame = minute_bars_to_frame(&bars, "test")?;
 
         let local_path =
-            write_minute_partition_file_local(&staging_dir, "2026-05-24", "SZ", &bars)?;
+            write_minute_partition_file_local(&staging_dir, "2026-05-24", "SZ", &frame)?;
 
         let expected = staging_dir.join(minute_partition_key("2026-05-24", "SZ"));
         assert_eq!(local_path, expected);
@@ -441,19 +523,25 @@ mod tests {
         let start_date = "2026-05-28".to_string();
         let end_date = start_date.clone();
 
-        let mut grouped =
+        let grouped =
             fetch_minute_grouped_bars(&api, &codes, &start_date, &end_date, 20, 1).await?;
         assert!(!grouped.is_empty(), "no remote minute rows fetched");
 
         let staging_dir = temp_dir("real-sync-minute");
         println!("staging_dir={}", staging_dir.display());
         let mut expected_by_key = BTreeMap::new();
-        for ((trade_date, exchange), bars) in &mut grouped {
-            bars.sort_by(|a, b| a.symbol.cmp(&b.symbol).then(a.time.cmp(&b.time)));
+        for ((trade_date, exchange), frame) in &grouped {
             let key = minute_partition_key(trade_date, exchange);
-            let path = write_minute_partition_file_local(&staging_dir, trade_date, exchange, bars)?;
-            println!("wrote {} rows={} path={}", key, bars.len(), path.display());
-            expected_by_key.insert(key.clone(), rows_from_minute_bars(bars));
+            let path =
+                write_minute_partition_file_local(&staging_dir, trade_date, exchange, frame)?;
+            println!(
+                "wrote {} rows={} path={}",
+                key,
+                frame.height(),
+                path.display()
+            );
+            let bars = minute_bars_from_frame(frame)?;
+            expected_by_key.insert(key.clone(), rows_from_minute_bars(&bars));
             let actual = read_full_rows(&path)?;
             assert_eq!(
                 actual, expected_by_key[&key],

@@ -47,19 +47,17 @@ impl PatternDetector for ImmortalGuidanceDetector {
     }
 
     fn detect(&self, series: &BarSeries, indicators: &SeriesIndicators) -> Option<PatternSignal> {
-        let bars = &series.bars;
-        if bars.len() < self.trend_lookback_days.max(4) {
+        if series.len() < self.trend_lookback_days.max(4) {
             return None;
         }
         let idx = latest_idx(series);
-        let today = &bars[idx];
+        let today = series.bar(idx)?;
         let today_ma5 = indicators.ma5[idx]?;
         if today.close < today_ma5 || today.volume <= 0.0 {
             return None;
         }
-        let closes: Vec<f64> = bars[bars.len() - self.trend_lookback_days..]
-            .iter()
-            .map(|bar| bar.close)
+        let closes: Vec<f64> = (series.len() - self.trend_lookback_days..series.len())
+            .filter_map(|idx| series.bar(idx).map(|bar| bar.close))
             .collect();
         let (slope, r2) = linear_regression_metrics(&closes)?;
         if slope <= 0.0 || r2 < self.trend_r_squared_threshold {
@@ -70,16 +68,16 @@ impl PatternDetector for ImmortalGuidanceDetector {
                 break;
             }
             let signal_idx = idx - offset;
-            let prev_close = bars[signal_idx - 1].close;
-            let surge = (bars[signal_idx].high - prev_close) / prev_close.max(1e-6);
-            let upper_shadow =
-                bars[signal_idx].high - bars[signal_idx].open.max(bars[signal_idx].close);
-            let shadow_ratio = upper_shadow / bars[signal_idx].high.max(1e-6);
+            let signal_bar = series.bar(signal_idx)?;
+            let prev_close = series.bar(signal_idx - 1)?.close;
+            let surge = (signal_bar.high - prev_close) / prev_close.max(1e-6);
+            let upper_shadow = signal_bar.high - signal_bar.open.max(signal_bar.close);
+            let shadow_ratio = upper_shadow / signal_bar.high.max(1e-6);
             let volume_ma5 = indicators.volume_ma5[signal_idx]?;
             let ma5 = indicators.ma5[signal_idx]?;
             let ma10 = indicators.ma10[signal_idx]?;
             let ma20 = indicators.ma20[signal_idx]?;
-            let signal_volume_ratio = bars[signal_idx].volume / volume_ma5.max(1e-6);
+            let signal_volume_ratio = signal_bar.volume / volume_ma5.max(1e-6);
             if surge < self.surge_threshold
                 || shadow_ratio < self.upper_shadow_ratio
                 || signal_volume_ratio < self.volume_ratio_min
@@ -87,13 +85,12 @@ impl PatternDetector for ImmortalGuidanceDetector {
             {
                 continue;
             }
-            let body_top = bars[signal_idx].open.max(bars[signal_idx].close);
-            let anti_body = body_top + (bars[signal_idx].high - body_top) * self.anti_body_ratio;
+            let body_top = signal_bar.open.max(signal_bar.close);
+            let anti_body = body_top + (signal_bar.high - body_top) * self.anti_body_ratio;
             if today.close >= anti_body
-                && bars[signal_idx + 1..=idx]
-                    .iter()
+                && (signal_idx + 1..=idx)
                     .take(idx - signal_idx)
-                    .all(|bar| bar.close < anti_body)
+                    .all(|idx| series.bar(idx).is_some_and(|bar| bar.close < anti_body))
             {
                 let today_volume_ratio =
                     today.volume / indicators.volume_ma5[idx].unwrap_or(today.volume).max(1e-6);
@@ -105,18 +102,18 @@ impl PatternDetector for ImmortalGuidanceDetector {
                     &["upper-shadow", "trend"],
                     "冲高回落长上影后的数日内完成反包确认，符合仙人指路结构。",
                     json!({
-                        "key_date": bars[signal_idx].time.format("%Y-%m-%d").to_string(),
+                        "key_date": signal_bar.time.format("%Y-%m-%d").to_string(),
                         "key_date_type": "仙人指路信号日",
                         "price": today.close,
                         "volume_ratio": today_volume_ratio,
-                        "signal_day": bars[signal_idx].time.format("%Y-%m-%d").to_string(),
+                        "signal_day": signal_bar.time.format("%Y-%m-%d").to_string(),
                         "surge_pct": surge,
                         "upper_shadow_ratio": shadow_ratio,
                         "anti_body_price": anti_body,
-                        "support_level": bars[signal_idx].open,
-                        "key_day_open": bars[signal_idx].open,
-                        "key_day_close": bars[signal_idx].close,
-                        "key_day_high": bars[signal_idx].high,
+                        "support_level": signal_bar.open,
+                        "key_day_open": signal_bar.open,
+                        "key_day_close": signal_bar.close,
+                        "key_day_high": signal_bar.high,
                         "ma5": ma5,
                         "ma10": ma10,
                         "ma20": ma20,

@@ -24,15 +24,15 @@ pub fn signal(
     }
 }
 
-pub fn pct_change(bars: &[Bar], idx: usize) -> Option<f64> {
-    if idx == 0 || idx >= bars.len() {
+pub fn pct_change(series: &BarSeries, idx: usize) -> Option<f64> {
+    if idx == 0 || idx >= series.len() {
         return None;
     }
-    let prev = bars[idx - 1].close;
+    let prev = series.bar(idx - 1)?.close;
     if prev <= 0.0 {
         return None;
     }
-    Some((bars[idx].close - prev) / prev)
+    Some((series.bar(idx)?.close - prev) / prev)
 }
 
 pub fn body_ratio(bar: &Bar) -> f64 {
@@ -51,22 +51,28 @@ pub fn is_bearish(bar: &Bar) -> bool {
     bar.close < bar.open
 }
 
-pub fn window_high(bars: &[Bar], start: usize, end_inclusive: usize) -> f64 {
-    bars[start..=end_inclusive]
-        .iter()
-        .map(|bar| bar.high)
-        .fold(f64::NEG_INFINITY, f64::max)
+pub fn window_high(series: &BarSeries, start: usize, end_inclusive: usize) -> f64 {
+    let mut out = f64::NEG_INFINITY;
+    for idx in start..=end_inclusive {
+        if let Some(bar) = series.bar(idx) {
+            out = out.max(bar.high);
+        }
+    }
+    out
 }
 
-pub fn window_low(bars: &[Bar], start: usize, end_inclusive: usize) -> f64 {
-    bars[start..=end_inclusive]
-        .iter()
-        .map(|bar| bar.low)
-        .fold(f64::INFINITY, f64::min)
+pub fn window_low(series: &BarSeries, start: usize, end_inclusive: usize) -> f64 {
+    let mut out = f64::INFINITY;
+    for idx in start..=end_inclusive {
+        if let Some(bar) = series.bar(idx) {
+            out = out.min(bar.low);
+        }
+    }
+    out
 }
 
 pub fn latest_idx(series: &BarSeries) -> usize {
-    series.bars.len().saturating_sub(1)
+    series.len().saturating_sub(1)
 }
 
 pub fn linear_regression_metrics(values: &[f64]) -> Option<(f64, f64)> {

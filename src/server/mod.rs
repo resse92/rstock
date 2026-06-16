@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod errors;
+mod feishu;
 mod patterns;
 mod tdx;
 mod whole_quote;

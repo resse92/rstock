@@ -26,6 +26,8 @@ futures-util = "0.3"
 storage = { package = "rstock-storage", path = "crates/storage" }
 jobs = { package = "rstock-jobs", path = "crates/jobs", default-features = false }
 qmt = { path = "vendor/qmt" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tdxrs = { path = "vendor/tdxrs" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }

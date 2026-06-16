@@ -17,7 +17,7 @@ use jobs::patterns::{
 };
 use jobs::utils::load_stock_codes_from_file;
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 
 use super::app::{cleanup_market_scan_jobs, AppState, MarketScanJob, MarketScanJobStatus};
 use super::errors::ApiError;
@@ -114,6 +114,9 @@ pub struct PatternListResponse {
     pub pattern_ids: Vec<String>,
 }
 
+const FEISHU_SIGNAL_LIMIT: usize = 30;
+const FEISHU_FAILURE_LIMIT: usize = 20;
+
 pub async fn list_patterns() -> Json<PatternListResponse> {
     info!(target: "rstock::patterns", "list pattern ids");
     Json(PatternListResponse {
@@ -181,6 +184,11 @@ pub async fn check_all_patterns(
         req.refresh_remote,
     )
     .await?;
+
+    dispatch_feishu_report(
+        state.clone(),
+        render_check_all_feishu_message(&req.symbol, trade_date, &report),
+    );
 
     Ok(Json(PatternAllResponse {
         symbol: req.symbol,
@@ -366,6 +374,8 @@ async fn run_market_scan_job(
     let scanner = build_scanner(&state, one_detector(&pattern_id)?)?;
     let progress_state = state.clone();
     let progress_job_id = job_id.clone();
+    let notify_state = state.clone();
+    let notify_job_id = job_id.clone();
     let report = run_scan_with_progress(
         &scanner,
         symbols,
@@ -381,6 +391,10 @@ async fn run_market_scan_job(
         },
     )
     .await?;
+    dispatch_feishu_report(
+        notify_state,
+        render_market_scan_feishu_message(&notify_job_id, &pattern_id, trade_date, &report),
+    );
     complete_market_scan_job(&state, &job_id, &pattern_id, trade_date, report).await;
     Ok(())
 }
@@ -449,13 +463,20 @@ async fn complete_market_scan_job(
 }
 
 async fn fail_market_scan_job(state: &AppState, job_id: &str, error: String) {
+    let mut notify_payload = None;
     let mut jobs = state.market_scan_jobs.lock().await;
     if let Some(job) = jobs.get_mut(job_id) {
         job.status = MarketScanJobStatus::Failed;
         job.error = Some(error);
         job.finished_at = Some(Utc::now());
+        notify_payload = Some(render_market_scan_failed_feishu_message(job));
     }
     cleanup_market_scan_jobs(&mut jobs, Utc::now());
+    drop(jobs);
+
+    if let Some(message) = notify_payload {
+        dispatch_feishu_report(state.clone(), message);
+    }
 }
 
 fn pattern_market_job_response(job: MarketScanJob) -> PatternMarketJobResponse {
@@ -584,4 +605,156 @@ fn available_pattern_ids() -> Vec<String> {
         .collect::<Vec<_>>();
     ids.sort();
     ids
+}
+
+fn dispatch_feishu_report(state: AppState, message: String) {
+    if !state.feishu.is_enabled() {
+        return;
+    }
+
+    tokio::spawn(async move {
+        if let Err(err) = state.feishu.send_text(message).await {
+            warn!(target: "rstock::patterns", error = %err, "send feishu report failed");
+        }
+    });
+}
+
+fn render_check_all_feishu_message(
+    symbol: &str,
+    trade_date: NaiveDate,
+    report: &PatternScanReport,
+) -> String {
+    let mut lines = vec![
+        "Pattern Check-All Finished".to_string(),
+        format!("Trade Date: {}", trade_date.format("%Y-%m-%d")),
+        format!("Symbol: {symbol}"),
+        format!(
+            "Summary: matched {} patterns, skipped {} short series, failed {} symbols",
+            report.signal_count,
+            report.skipped_short_series,
+            report.failed_symbols.len()
+        ),
+        String::new(),
+    ];
+    append_signal_section(
+        &mut lines,
+        "Matched Patterns",
+        &report.signals,
+        FEISHU_SIGNAL_LIMIT,
+    );
+    append_failure_section(&mut lines, &report.failed_symbols, FEISHU_FAILURE_LIMIT);
+    lines.join("\n")
+}
+
+fn render_market_scan_feishu_message(
+    job_id: &str,
+    pattern_id: &str,
+    trade_date: NaiveDate,
+    report: &PatternScanReport,
+) -> String {
+    let mut lines = vec![
+        "Pattern Market Scan Finished".to_string(),
+        format!("Job ID: {job_id}"),
+        format!("Trade Date: {}", trade_date.format("%Y-%m-%d")),
+        format!("Pattern: {pattern_id}"),
+        format!(
+            "Summary: requested {}, completed {}, matched {}, fetched {}, failed {}",
+            report.requested_symbols,
+            report.requested_symbols,
+            report.signal_count,
+            report.fetched_symbols.len(),
+            report.failed_symbols.len()
+        ),
+        format!("Skipped Short Series: {}", report.skipped_short_series),
+        String::new(),
+    ];
+    append_signal_section(
+        &mut lines,
+        "Matched Signals",
+        &report.signals,
+        FEISHU_SIGNAL_LIMIT,
+    );
+    append_failure_section(&mut lines, &report.failed_symbols, FEISHU_FAILURE_LIMIT);
+    lines.join("\n")
+}
+
+fn render_market_scan_failed_feishu_message(job: &MarketScanJob) -> String {
+    let mut lines = vec![
+        "Pattern Market Scan Failed".to_string(),
+        format!("Job ID: {}", job.job_id),
+        format!("Trade Date: {}", job.trade_date.format("%Y-%m-%d")),
+        format!("Pattern: {}", job.pattern_id),
+        format!("Requested Symbols: {}", job.requested_symbols),
+        format!("Completed Symbols: {}", job.completed_symbols),
+    ];
+
+    if let Some(error) = job.error.as_ref() {
+        lines.push(format!("Error: {}", flatten_text(error)));
+    }
+
+    if !job.failed_symbols.is_empty() {
+        lines.push(String::new());
+        append_failure_section(&mut lines, &job.failed_symbols, FEISHU_FAILURE_LIMIT);
+    }
+
+    lines.join("\n")
+}
+
+fn append_signal_section(
+    lines: &mut Vec<String>,
+    title: &str,
+    signals: &[PatternSignal],
+    limit: usize,
+) {
+    lines.push(format!("{title}:"));
+    if signals.is_empty() {
+        lines.push("- None".to_string());
+        lines.push(String::new());
+        return;
+    }
+
+    for signal in signals.iter().take(limit) {
+        lines.push(format_signal_line(signal));
+    }
+    append_omitted_count(lines, signals.len(), limit);
+    lines.push(String::new());
+}
+
+fn append_failure_section(lines: &mut Vec<String>, failures: &[PatternScanFailure], limit: usize) {
+    lines.push("Failed Symbols:".to_string());
+    if failures.is_empty() {
+        lines.push("- None".to_string());
+        return;
+    }
+
+    for failure in failures.iter().take(limit) {
+        lines.push(format!(
+            "- {} | {}",
+            failure.symbol,
+            flatten_text(&failure.error)
+        ));
+    }
+    append_omitted_count(lines, failures.len(), limit);
+}
+
+fn append_omitted_count(lines: &mut Vec<String>, actual: usize, limit: usize) {
+    if actual > limit {
+        lines.push(format!("- ... and {} more", actual - limit));
+    }
+}
+
+fn format_signal_line(signal: &PatternSignal) -> String {
+    let explanation = flatten_text(&signal.explanation);
+    format!(
+        "- {} | {} | {} | score {:.2} | {}",
+        signal.symbol,
+        signal.pattern_id,
+        signal.signal_date.format("%Y-%m-%d"),
+        signal.score,
+        explanation
+    )
+}
+
+fn flatten_text(input: &str) -> String {
+    input.split_whitespace().collect::<Vec<_>>().join(" ")
 }

@@ -6,6 +6,7 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use jobs::patterns::{PatternScanFailure, PatternScanReport};
 use tokio::sync::Mutex;
 
+use super::feishu::FeishuNotifier;
 use super::whole_quote::WholeQuoteSubscription;
 
 use super::config::ServerConfig;
@@ -50,16 +51,19 @@ pub struct AppState {
     pub whole_quote: Arc<Mutex<WholeQuoteSubscription>>,
     pub market_scan_jobs: Arc<Mutex<HashMap<String, MarketScanJob>>>,
     pub next_market_scan_job_id: Arc<AtomicU64>,
+    pub feishu: Arc<FeishuNotifier>,
 }
 
 impl AppState {
     pub fn new(args: ServerConfig) -> Self {
+        let feishu_bot_token = args.feishu_bot_token.clone();
         Self {
             args: Arc::new(args),
             sync_lock: Arc::new(Mutex::new(())),
             whole_quote: Arc::new(Mutex::new(WholeQuoteSubscription::default())),
             market_scan_jobs: Arc::new(Mutex::new(HashMap::new())),
             next_market_scan_job_id: Arc::new(AtomicU64::new(1)),
+            feishu: Arc::new(FeishuNotifier::new(feishu_bot_token)),
         }
     }
 

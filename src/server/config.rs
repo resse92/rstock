@@ -30,6 +30,7 @@ pub struct ServerConfig {
     pub s3_host: Option<String>,
     pub pattern_adjust_type: String,
     pub pattern_tdx_fallback: bool,
+    pub feishu_bot_token: Option<String>,
 }
 
 impl ServerConfig {
@@ -64,6 +65,7 @@ impl ServerConfig {
             s3_host: Some(config.s3.host),
             pattern_adjust_type: config.patterns.adjust_type,
             pattern_tdx_fallback: config.patterns.tdx_fallback,
+            feishu_bot_token: empty_to_none(std::env::var("FEISHU_BOT_TOKEN").ok()),
         })
     }
 }

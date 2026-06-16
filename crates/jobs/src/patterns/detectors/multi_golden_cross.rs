@@ -70,7 +70,9 @@ impl PatternDetector for MultiGoldenCrossDetector {
         let (ma_day, kdj_day, macd_day) = (ma_cross_day?, kdj_cross_day?, macd_cross_day?);
         let min_day = ma_day.min(kdj_day).min(macd_day);
         let max_day = ma_day.max(kdj_day).max(macd_day);
-        let latest = series.bar(idx)?;
+        let latest_close = series.close_at(idx)?;
+        let latest_volume = series.volume_at(idx)?;
+        let latest_time = series.time_at(idx)?;
         let ma5 = indicators.ma5[idx]?;
         let ma20 = indicators.ma20[idx]?;
         let k = indicators.k[idx]?;
@@ -82,26 +84,26 @@ impl PatternDetector for MultiGoldenCrossDetector {
         let vol_ma5 = indicators.volume_ma5[idx]?;
         let short_trend = indicators.short_trend[idx]?;
         let bull_bear = indicators.bull_bear_line[idx]?;
-        let volume_ratio = latest.volume / vol_ma5.max(1e-6);
+        let volume_ratio = latest_volume / vol_ma5.max(1e-6);
         let max_gap = max_day - min_day;
         if max_gap <= self.resonance_days
-            && latest.close > ma5
-            && latest.close > ma20
+            && latest_close > ma5
+            && latest_close > ma20
             && volume_ratio >= self.min_volume_ratio
         {
             return Some(signal(
                 self.id(),
                 series,
-                latest.time,
+                latest_time,
                 0.81,
                 &["golden-cross", "resonance"],
                 "均线、KDJ、MACD 在短周期内形成多金叉共振。",
                 json!({
-                    "key_date": series.bar(min_day)?.time.format("%Y-%m-%d").to_string(),
+                    "key_date": series.time_at(min_day)?.format("%Y-%m-%d").to_string(),
                     "key_date_type": "多金叉共振日",
-                    "ma_cross_date": series.bar(ma_day)?.time.format("%Y-%m-%d").to_string(),
-                    "kdj_cross_date": series.bar(kdj_day)?.time.format("%Y-%m-%d").to_string(),
-                    "macd_cross_date": series.bar(macd_day)?.time.format("%Y-%m-%d").to_string(),
+                    "ma_cross_date": series.time_at(ma_day)?.format("%Y-%m-%d").to_string(),
+                    "kdj_cross_date": series.time_at(kdj_day)?.format("%Y-%m-%d").to_string(),
+                    "macd_cross_date": series.time_at(macd_day)?.format("%Y-%m-%d").to_string(),
                     "max_gap_days": max_gap,
                     "ma5": ma5,
                     "ma20": ma20,

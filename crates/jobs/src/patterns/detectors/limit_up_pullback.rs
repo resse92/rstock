@@ -63,16 +63,18 @@ impl PatternDetector for LimitUpPullbackDetector {
                 continue;
             }
 
-            let limit_bar = series.bar(limit_idx)?;
+            let limit_close = series.close_at(limit_idx)?;
+            let limit_volume = series.volume_at(limit_idx)?;
+            let limit_time = series.time_at(limit_idx)?;
 
             let volume_start = limit_idx.saturating_sub(5);
             let mut baseline_volume = 0.0;
             for idx in volume_start..limit_idx {
-                baseline_volume += series.bar(idx)?.volume;
+                baseline_volume += series.volume_at(idx)?;
             }
             baseline_volume /= (limit_idx - volume_start).max(1) as f64;
             if baseline_volume <= 0.0
-                || limit_bar.volume / baseline_volume < self.volume_ratio_threshold
+                || limit_volume / baseline_volume < self.volume_ratio_threshold
             {
                 continue;
             }
@@ -84,7 +86,7 @@ impl PatternDetector for LimitUpPullbackDetector {
 
             let pullback_start = limit_idx + 1;
             let lowest_low = window_low(series, pullback_start, latest_idx);
-            if lowest_low < limit_bar.close * self.support_ratio {
+            if lowest_low < limit_close * self.support_ratio {
                 continue;
             }
 
@@ -95,76 +97,74 @@ impl PatternDetector for LimitUpPullbackDetector {
             }
 
             let pullback_closes = (pullback_start..=latest_idx)
-                .filter_map(|idx| series.bar(idx).map(|bar| bar.close))
+                .filter_map(|idx| series.close_at(idx))
                 .collect::<Vec<_>>();
             if pullback_closes
                 .iter()
-                .any(|close| *close < limit_bar.close * self.support_ratio)
+                .any(|close| *close < limit_close * self.support_ratio)
             {
                 continue;
             }
             if pullback_closes
                 .iter()
-                .any(|close| *close > limit_bar.close * self.resistance_ratio)
+                .any(|close| *close > limit_close * self.resistance_ratio)
             {
                 continue;
             }
-            if pullback_closes
-                .iter()
-                .all(|close| *close >= limit_bar.close)
-            {
+            if pullback_closes.iter().all(|close| *close >= limit_close) {
                 continue;
             }
-            let shrink_threshold = limit_bar.volume * self.volume_shrinkage_ratio;
+            let shrink_threshold = limit_volume * self.volume_shrinkage_ratio;
             if (pullback_start..=latest_idx).all(|idx| {
                 series
-                    .bar(idx)
-                    .is_some_and(|bar| bar.volume > shrink_threshold)
+                    .volume_at(idx)
+                    .is_some_and(|volume| volume > shrink_threshold)
             }) {
                 continue;
             }
-            let latest_bar = series.bar(latest_idx)?;
-            if !is_bullish(&latest_bar) {
+            let latest_time = series.time_at(latest_idx)?;
+            let latest_volume = series.volume_at(latest_idx)?;
+            if !is_bullish(series, latest_idx)? {
                 continue;
             }
 
-            let support_price = limit_bar.close * self.support_ratio;
-            let resistance_price = limit_bar.close * self.resistance_ratio;
-            let has_lower_close = pullback_closes.iter().any(|close| *close < limit_bar.close);
+            let support_price = limit_close * self.support_ratio;
+            let resistance_price = limit_close * self.resistance_ratio;
+            let has_lower_close = pullback_closes.iter().any(|close| *close < limit_close);
             let has_volume_shrinkage = (pullback_start..=latest_idx).any(|idx| {
                 series
-                    .bar(idx)
-                    .is_some_and(|bar| bar.volume <= shrink_threshold)
+                    .volume_at(idx)
+                    .is_some_and(|volume| volume <= shrink_threshold)
             });
 
             let vol_ratio = indicators
                 .volume_ma5
                 .get(latest_idx)
                 .and_then(|value| *value)
-                .map(|value| latest_bar.volume / value.max(1e-6))
+                .map(|value| latest_volume / value.max(1e-6))
                 .unwrap_or(0.0);
 
             return Some(signal(
                 self.id(),
                 series,
-                latest_bar.time,
+                latest_time,
                 0.82,
                 &["price-action", "volume-confirmed"],
                 "最近出现放量涨停，随后回调未破关键支撑，最新一日转强。",
                 json!({
-                    "key_date": limit_bar.time.format("%Y-%m-%d").to_string(),
+                    "key_date": limit_time.format("%Y-%m-%d").to_string(),
                     "key_date_type": "涨停日",
-                    "limit_up_date": limit_bar.time.format("%Y-%m-%d").to_string(),
+                    "limit_up_date": limit_time.format("%Y-%m-%d").to_string(),
                     "pullback_days": pullback_days,
                     "pullback_range": pullback_range,
-                    "volume_ratio": limit_bar.volume / baseline_volume,
+                    "volume_ratio": limit_volume / baseline_volume,
                     "support_price": support_price,
                     "resistance_price": resistance_price,
                     "has_lower_close": has_lower_close,
                     "has_volume_shrinkage": has_volume_shrinkage,
                     "latest_volume_ratio": vol_ratio,
                     "reasons": [
-                        format!("涨停日量比 {:.2}", limit_bar.volume / baseline_volume),
+                        format!("涨停日量比 {:.2}", limit_volume / baseline_volume),
                         format!("回调 {} 天，区间振幅 {:.2}%", pullback_days, pullback_range * 100.0),
                         format!("回调期间未破支撑 {:.2}，且至少出现一次缩量", support_price),
                     ],

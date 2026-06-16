@@ -63,48 +63,54 @@ impl PatternDetector for MultiPartyCannonDetector {
         if idx < 2 {
             return None;
         }
-        let first = series.bar(idx - 2)?;
-        let second = series.bar(idx - 1)?;
-        let third = series.bar(idx)?;
+        let first_open = series.open_at(idx - 2)?;
+        let first_close = series.close_at(idx - 2)?;
+        let first_volume = series.volume_at(idx - 2)?;
+        let second_close = series.close_at(idx - 1)?;
+        let second_volume = series.volume_at(idx - 1)?;
+        let third_open = series.open_at(idx)?;
+        let third_close = series.close_at(idx)?;
+        let third_volume = series.volume_at(idx)?;
+        let third_time = series.time_at(idx)?;
         let ma20 = indicators.ma20[idx];
         let vol_ma5 = indicators.volume_ma5[idx];
         let macd_hist = indicators.macd_hist[idx];
         let j = indicators.j[idx];
 
-        let first_rise = (first.close - first.open) / first.open.max(1e-6);
-        let third_rise = (third.close - third.open) / third.open.max(1e-6);
-        let first_body = body_ratio(&first);
-        let second_body = body_ratio(&second);
-        let first_body_abs = (first.close - first.open).abs();
-        let fallback = (first.close - second.close).max(0.0) / first_body_abs.max(1e-6);
+        let first_rise = (first_close - first_open) / first_open.max(1e-6);
+        let third_rise = (third_close - third_open) / third_open.max(1e-6);
+        let first_body = body_ratio(series, idx - 2)?;
+        let second_body = body_ratio(series, idx - 1)?;
+        let first_body_abs = (first_close - first_open).abs();
+        let fallback = (first_close - second_close).max(0.0) / first_body_abs.max(1e-6);
 
-        if !is_bullish(&first)
+        if !is_bullish(series, idx - 2)?
             || first_rise < self.first_candle_rise
-            || !is_bearish(&second)
+            || !is_bearish(series, idx - 1)?
             || second_body > first_body * self.second_candle_body_ratio
             || fallback > self.second_candle_fallback_ratio
-            || !is_bullish(&third)
+            || !is_bullish(series, idx)?
             || third_rise < self.third_candle_rise
         {
             return None;
         }
 
-        if self.third_candle_breakthrough && third.close <= first.close {
+        if self.third_candle_breakthrough && third_close <= first_close {
             return None;
         }
-        if second.volume > first.volume * self.second_volume_shrink_ratio {
+        if second_volume > first_volume * self.second_volume_shrink_ratio {
             return None;
         }
-        if third.volume <= first.volume * self.third_volume_expand_ratio {
+        if third_volume <= first_volume * self.third_volume_expand_ratio {
             return None;
         }
         if vol_ma5
-            .map(|value| third.volume < value * self.third_volume_ma_ratio)
+            .map(|value| third_volume < value * self.third_volume_ma_ratio)
             .unwrap_or(false)
         {
             return None;
         }
-        if self.enable_ma_filter && ma20.map(|value| third.close < value).unwrap_or(true) {
+        if self.enable_ma_filter && ma20.map(|value| third_close < value).unwrap_or(true) {
             return None;
         }
         if self.enable_macd_filter
@@ -127,8 +133,8 @@ impl PatternDetector for MultiPartyCannonDetector {
         } else {
             "standard"
         };
-        let third_volume_ratio = third.volume / first.volume.max(1e-6);
-        let third_vs_ma5_volume = vol_ma5.map(|value| third.volume / value).unwrap_or(0.0);
+        let third_volume_ratio = third_volume / first_volume.max(1e-6);
+        let third_vs_ma5_volume = vol_ma5.map(|value| third_volume / value).unwrap_or(0.0);
         let fallback_pct = fallback * 100.0;
         let reasons = vec![
             format!("第一根阳线涨幅 {:.2}%", first_rise * 100.0),
@@ -140,7 +146,7 @@ impl PatternDetector for MultiPartyCannonDetector {
             format!(
                 "第三根阳线涨幅 {:.2}%，{}第一根收盘价",
                 third_rise * 100.0,
-                if third.close > first.close {
+                if third_close > first_close {
                     "突破"
                 } else {
                     "逼近"
@@ -155,12 +161,12 @@ impl PatternDetector for MultiPartyCannonDetector {
         Some(signal(
             self.id(),
             series,
-            third.time,
+            third_time,
             0.73,
             &["candlestick", "breakout"],
             "最近三根K线构成两阳夹一阴的多方炮，第三根放量突破前高。",
             json!({
-                "key_date": third.time.format("%Y-%m-%d").to_string(),
+                "key_date": third_time.format("%Y-%m-%d").to_string(),
                 "pattern_category": category,
                 "first_rise_pct": first_rise,
                 "second_body_ratio": second_body / first_body.max(1e-6),

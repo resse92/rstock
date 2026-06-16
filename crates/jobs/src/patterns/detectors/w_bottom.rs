@@ -57,11 +57,11 @@ impl PatternDetector for WBottomDetector {
         let scan_start = end.saturating_sub(self.pattern_days);
         let mut lows = Vec::new();
         for idx in scan_start + 2..latest_idx.saturating_sub(5) {
-            let low = series.bar(idx)?.low;
-            if low <= series.bar(idx - 1)?.low
-                && low <= series.bar(idx - 2)?.low
-                && low <= series.bar(idx + 1)?.low
-                && low <= series.bar(idx + 2)?.low
+            let low = series.low_at(idx)?;
+            if low <= series.low_at(idx - 1)?
+                && low <= series.low_at(idx - 2)?
+                && low <= series.low_at(idx + 1)?
+                && low <= series.low_at(idx + 2)?
             {
                 lows.push(idx);
             }
@@ -74,14 +74,18 @@ impl PatternDetector for WBottomDetector {
         if l2 <= l1 + self.min_gap {
             return None;
         }
-        let left_bottom = series.bar(l1)?;
-        let right_bottom = series.bar(l2)?;
-        let diff = (left_bottom.low - right_bottom.low).abs() / left_bottom.low.max(1e-6);
+        let left_low = series.low_at(l1)?;
+        let right_low = series.low_at(l2)?;
+        let left_time = series.time_at(l1)?;
+        let right_time = series.time_at(l2)?;
+        let left_volume = series.volume_at(l1)?;
+        let right_volume = series.volume_at(l2)?;
+        let diff = (left_low - right_low).abs() / left_low.max(1e-6);
         if diff > self.bottom_diff_threshold {
             return None;
         }
         let neckline = window_high(series, l1, l2);
-        if neckline < left_bottom.low * 1.1 {
+        if neckline < left_low * 1.1 {
             return None;
         }
 
@@ -90,12 +94,13 @@ impl PatternDetector for WBottomDetector {
         for idx in break_search_start..end {
             let change = pct_change(series, idx)?;
             let vol_ma = indicators.volume_ma5[idx]?;
-            let current = series.bar(idx)?;
+            let current_close = series.close_at(idx)?;
+            let current_volume = series.volume_at(idx)?;
             if change > 0.08
-                && current.volume >= vol_ma * self.volume_expand_ratio
-                && current.close >= neckline * (1.0 + self.breakout_ratio)
+                && current_volume >= vol_ma * self.volume_expand_ratio
+                && current_close >= neckline * (1.0 + self.breakout_ratio)
                 && idx > 0
-                && series.bar(idx - 1)?.close < neckline
+                && series.close_at(idx - 1)? < neckline
             {
                 break_idx = Some(idx);
                 break;
@@ -115,23 +120,26 @@ impl PatternDetector for WBottomDetector {
         }
         let mut max_high_before_l1 = f64::NEG_INFINITY;
         for idx in before_start..before_end {
-            max_high_before_l1 = max_high_before_l1.max(series.bar(idx)?.high);
+            max_high_before_l1 = max_high_before_l1.max(series.high_at(idx)?);
         }
-        if max_high_before_l1 <= left_bottom.low * 1.2 {
+        if max_high_before_l1 <= left_low * 1.2 {
             return None;
         }
 
         let support_price = neckline * self.support_ratio;
         let support_end = (break_idx + self.support_days).min(latest_idx);
         if break_idx < support_end
-            && (break_idx + 1..=support_end)
-                .any(|idx| series.bar(idx).is_some_and(|bar| bar.close < support_price))
+            && (break_idx + 1..=support_end).any(|idx| {
+                series
+                    .close_at(idx)
+                    .is_some_and(|close| close < support_price)
+            })
         {
             return None;
         }
 
-        let l1_volume = left_bottom.volume;
-        let l2_volume = right_bottom.volume;
+        let l1_volume = left_volume;
+        let l2_volume = right_volume;
         let volume_shrink_ratio = if l1_volume > 0.0 {
             l2_volume / l1_volume
         } else {
@@ -139,31 +147,32 @@ impl PatternDetector for WBottomDetector {
         };
         let volume_shrink = l1_volume > 0.0 && l2_volume < l1_volume * self.volume_shrink_ratio;
         if break_idx >= latest_idx.saturating_sub(20) {
-            let latest_bar = series.bar(latest_idx)?;
-            let break_bar = series.bar(break_idx)?;
+            let latest_time = series.time_at(latest_idx)?;
+            let break_time = series.time_at(break_idx)?;
+            let break_volume = series.volume_at(break_idx)?;
             return Some(signal(
                 self.id(),
                 series,
-                latest_bar.time,
+                latest_time,
                 0.79,
                 &["double-bottom", "breakout"],
                 "双底结构完成后在近端放量突破颈线。",
                 json!({
-                    "key_date": break_bar.time.format("%Y-%m-%d").to_string(),
+                    "key_date": break_time.format("%Y-%m-%d").to_string(),
                     "key_date_type": "颈线突破日",
-                    "left_bottom_date": left_bottom.time.format("%Y-%m-%d").to_string(),
-                    "right_bottom_date": right_bottom.time.format("%Y-%m-%d").to_string(),
-                    "break_date": break_bar.time.format("%Y-%m-%d").to_string(),
+                    "left_bottom_date": left_time.format("%Y-%m-%d").to_string(),
+                    "right_bottom_date": right_time.format("%Y-%m-%d").to_string(),
+                    "break_date": break_time.format("%Y-%m-%d").to_string(),
                     "neckline": neckline,
                     "bottom_diff_ratio": diff,
-                    "break_volume_ratio": break_bar.volume / indicators.volume_ma5[break_idx]?.max(1e-6),
+                    "break_volume_ratio": break_volume / indicators.volume_ma5[break_idx]?.max(1e-6),
                     "support_price": support_price,
                     "trend_reversal": trend_ok,
                     "volume_shrink": volume_shrink,
                     "volume_shrink_ratio": volume_shrink_ratio,
                     "reasons": [
                         format!("双底价差 {:.2}%，间隔 {} 天", diff * 100.0, l2 - l1),
-                        format!("颈线 {:.2}，突破日放量 {:.2} 倍", neckline, break_bar.volume / indicators.volume_ma5[break_idx]?.max(1e-6)),
+                        format!("颈线 {:.2}，突破日放量 {:.2} 倍", neckline, break_volume / indicators.volume_ma5[break_idx]?.max(1e-6)),
                         format!("突破后支撑位 {:.2} 未被跌破", support_price),
                     ],
                 }),

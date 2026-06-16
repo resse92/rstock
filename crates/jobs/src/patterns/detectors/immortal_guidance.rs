@@ -51,13 +51,15 @@ impl PatternDetector for ImmortalGuidanceDetector {
             return None;
         }
         let idx = latest_idx(series);
-        let today = series.bar(idx)?;
+        let today_close = series.close_at(idx)?;
+        let today_volume = series.volume_at(idx)?;
+        let today_time = series.time_at(idx)?;
         let today_ma5 = indicators.ma5[idx]?;
-        if today.close < today_ma5 || today.volume <= 0.0 {
+        if today_close < today_ma5 || today_volume <= 0.0 {
             return None;
         }
         let closes: Vec<f64> = (series.len() - self.trend_lookback_days..series.len())
-            .filter_map(|idx| series.bar(idx).map(|bar| bar.close))
+            .filter_map(|idx| series.close_at(idx))
             .collect();
         let (slope, r2) = linear_regression_metrics(&closes)?;
         if slope <= 0.0 || r2 < self.trend_r_squared_threshold {
@@ -68,16 +70,20 @@ impl PatternDetector for ImmortalGuidanceDetector {
                 break;
             }
             let signal_idx = idx - offset;
-            let signal_bar = series.bar(signal_idx)?;
-            let prev_close = series.bar(signal_idx - 1)?.close;
-            let surge = (signal_bar.high - prev_close) / prev_close.max(1e-6);
-            let upper_shadow = signal_bar.high - signal_bar.open.max(signal_bar.close);
-            let shadow_ratio = upper_shadow / signal_bar.high.max(1e-6);
+            let signal_high = series.high_at(signal_idx)?;
+            let signal_open = series.open_at(signal_idx)?;
+            let signal_close = series.close_at(signal_idx)?;
+            let signal_volume = series.volume_at(signal_idx)?;
+            let signal_time = series.time_at(signal_idx)?;
+            let prev_close = series.close_at(signal_idx - 1)?;
+            let surge = (signal_high - prev_close) / prev_close.max(1e-6);
+            let upper_shadow = signal_high - signal_open.max(signal_close);
+            let shadow_ratio = upper_shadow / signal_high.max(1e-6);
             let volume_ma5 = indicators.volume_ma5[signal_idx]?;
             let ma5 = indicators.ma5[signal_idx]?;
             let ma10 = indicators.ma10[signal_idx]?;
             let ma20 = indicators.ma20[signal_idx]?;
-            let signal_volume_ratio = signal_bar.volume / volume_ma5.max(1e-6);
+            let signal_volume_ratio = signal_volume / volume_ma5.max(1e-6);
             if surge < self.surge_threshold
                 || shadow_ratio < self.upper_shadow_ratio
                 || signal_volume_ratio < self.volume_ratio_min
@@ -85,35 +91,35 @@ impl PatternDetector for ImmortalGuidanceDetector {
             {
                 continue;
             }
-            let body_top = signal_bar.open.max(signal_bar.close);
-            let anti_body = body_top + (signal_bar.high - body_top) * self.anti_body_ratio;
-            if today.close >= anti_body
+            let body_top = signal_open.max(signal_close);
+            let anti_body = body_top + (signal_high - body_top) * self.anti_body_ratio;
+            if today_close >= anti_body
                 && (signal_idx + 1..=idx)
                     .take(idx - signal_idx)
-                    .all(|idx| series.bar(idx).is_some_and(|bar| bar.close < anti_body))
+                    .all(|idx| series.close_at(idx).is_some_and(|close| close < anti_body))
             {
                 let today_volume_ratio =
-                    today.volume / indicators.volume_ma5[idx].unwrap_or(today.volume).max(1e-6);
+                    today_volume / indicators.volume_ma5[idx].unwrap_or(today_volume).max(1e-6);
                 return Some(signal(
                     self.id(),
                     series,
-                    today.time,
+                    today_time,
                     0.75,
                     &["upper-shadow", "trend"],
                     "冲高回落长上影后的数日内完成反包确认，符合仙人指路结构。",
                     json!({
-                        "key_date": signal_bar.time.format("%Y-%m-%d").to_string(),
+                        "key_date": signal_time.format("%Y-%m-%d").to_string(),
                         "key_date_type": "仙人指路信号日",
-                        "price": today.close,
+                        "price": today_close,
                         "volume_ratio": today_volume_ratio,
-                        "signal_day": signal_bar.time.format("%Y-%m-%d").to_string(),
+                        "signal_day": signal_time.format("%Y-%m-%d").to_string(),
                         "surge_pct": surge,
                         "upper_shadow_ratio": shadow_ratio,
                         "anti_body_price": anti_body,
-                        "support_level": signal_bar.open,
-                        "key_day_open": signal_bar.open,
-                        "key_day_close": signal_bar.close,
-                        "key_day_high": signal_bar.high,
+                        "support_level": signal_open,
+                        "key_day_open": signal_open,
+                        "key_day_close": signal_close,
+                        "key_day_high": signal_high,
                         "ma5": ma5,
                         "ma10": ma10,
                         "ma20": ma20,
@@ -123,10 +129,10 @@ impl PatternDetector for ImmortalGuidanceDetector {
                         "trend_r2": r2,
                         "confirmation_details": {
                             "confirmed": true,
-                            "confirmed_date": today.time.format("%Y-%m-%d").to_string(),
+                            "confirmed_date": today_time.format("%Y-%m-%d").to_string(),
                             "days_to_confirm": offset,
-                            "anti_body_price": today.close,
-                            "close_above_ma5": today.close > today_ma5,
+                            "anti_body_price": today_close,
+                            "close_above_ma5": today_close > today_ma5,
                             "post_confirmation_stable": true
                         },
                         "reasons": [

@@ -123,59 +123,54 @@ impl BarSeries {
         self.frame.height() == 0
     }
 
-    pub fn latest(&self) -> Option<Bar> {
-        self.bar(self.len().saturating_sub(1))
-    }
-
-    pub fn bar(&self, idx: usize) -> Option<Bar> {
+    pub fn time_at(&self, idx: usize) -> Option<NaiveDate> {
         if idx >= self.frame.height() {
             return None;
         }
-        let symbol = self
-            .frame
-            .column("symbol")
-            .ok()?
-            .str()
-            .ok()?
-            .get(idx)?
-            .to_string();
-        let exchange = self
-            .frame
-            .column("exchange")
-            .ok()?
-            .str()
-            .ok()?
-            .get(idx)?
-            .to_string();
         let time_raw = self.frame.column("time").ok()?.str().ok()?.get(idx)?;
-        let time = NaiveDate::parse_from_str(time_raw, "%Y-%m-%d").ok()?;
-        let open = self.frame.column("open").ok()?.f64().ok()?.get(idx)?;
-        let high = self.frame.column("high").ok()?.f64().ok()?.get(idx)?;
-        let low = self.frame.column("low").ok()?.f64().ok()?.get(idx)?;
-        let close = self.frame.column("close").ok()?.f64().ok()?.get(idx)?;
-        let volume = self.frame.column("volume").ok()?.f64().ok()?.get(idx)?;
-        let amount = self.frame.column("amount").ok()?.f64().ok()?.get(idx);
-        let source = self
-            .frame
-            .column("source")
-            .ok()?
-            .str()
-            .ok()?
-            .get(idx)
-            .map(str::to_string);
+        NaiveDate::parse_from_str(time_raw, "%Y-%m-%d").ok()
+    }
 
-        Some(Bar {
-            symbol,
-            exchange,
-            time,
-            open,
-            high,
-            low,
-            close,
-            volume,
-            amount,
-            source,
-        })
+    pub fn open_at(&self, idx: usize) -> Option<f64> {
+        if idx >= self.frame.height() {
+            return None;
+        }
+        self.frame.column("open").ok()?.f64().ok()?.get(idx)
+    }
+
+    pub fn high_at(&self, idx: usize) -> Option<f64> {
+        if idx >= self.frame.height() {
+            return None;
+        }
+        self.frame.column("high").ok()?.f64().ok()?.get(idx)
+    }
+
+    pub fn low_at(&self, idx: usize) -> Option<f64> {
+        if idx >= self.frame.height() {
+            return None;
+        }
+        self.frame.column("low").ok()?.f64().ok()?.get(idx)
+    }
+
+    pub fn close_at(&self, idx: usize) -> Option<f64> {
+        if idx >= self.frame.height() {
+            return None;
+        }
+        self.frame.column("close").ok()?.f64().ok()?.get(idx)
+    }
+
+    pub fn volume_at(&self, idx: usize) -> Option<f64> {
+        if idx >= self.frame.height() {
+            return None;
+        }
+        self.frame.column("volume").ok()?.f64().ok()?.get(idx)
+    }
+
+    pub fn amount_at(&self, idx: usize) -> Option<f64> {
+        if idx >= self.frame.height() {
+            return None;
+        }
+        self.frame.column("amount").ok()?.f64().ok()?.get(idx)
     }
 }
 

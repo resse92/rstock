@@ -52,7 +52,8 @@ impl PatternDetector for ResistanceBreakoutDetector {
         }
 
         let latest_idx = latest_idx(series);
-        let latest = series.bar(latest_idx)?;
+        let latest_close = series.close_at(latest_idx)?;
+        let latest_time = series.time_at(latest_idx)?;
         let ma5 = indicators.ma5[latest_idx]?;
         let ma10 = indicators.ma10[latest_idx]?;
         let ma20 = indicators.ma20[latest_idx]?;
@@ -63,19 +64,21 @@ impl PatternDetector for ResistanceBreakoutDetector {
         let start_search = latest_idx.saturating_sub(self.max_search_days);
         for idx in (start_search..=latest_idx).rev() {
             let prev_close = if idx > 0 {
-                series.bar(idx - 1)?.close
+                series.close_at(idx - 1)?
             } else {
                 continue;
             };
-            let current = series.bar(idx)?;
-            let change_pct = (current.close - prev_close) / prev_close.max(1e-6);
+            let current_close = series.close_at(idx)?;
+            let current_volume = series.volume_at(idx)?;
+            let current_time = series.time_at(idx)?;
+            let change_pct = (current_close - prev_close) / prev_close.max(1e-6);
             let resistance_start = idx.saturating_sub(self.breakout_lookback);
             if idx <= resistance_start + self.min_resistance_gap {
                 continue;
             }
             let mut resistance = f64::NEG_INFINITY;
             for probe in resistance_start..idx {
-                resistance = resistance.max(series.bar(probe)?.high);
+                resistance = resistance.max(series.high_at(probe)?);
             }
             let vol_ma = match self.volume_ma_period {
                 5 => indicators.volume_ma5[idx],
@@ -84,15 +87,15 @@ impl PatternDetector for ResistanceBreakoutDetector {
                 _ => indicators.volume_ma5[idx],
             }?;
             if change_pct < self.min_change_pct
-                || current.close < resistance * (1.0 + self.breakout_ratio)
-                || current.volume < vol_ma * self.volume_ratio
+                || current_close < resistance * (1.0 + self.breakout_ratio)
+                || current_volume < vol_ma * self.volume_ratio
             {
                 continue;
             }
             let mut max_before_idx = None;
             let mut max_before_high = f64::NEG_INFINITY;
             for probe in resistance_start..idx {
-                let high = series.bar(probe)?.high;
+                let high = series.high_at(probe)?;
                 if high > max_before_high {
                     max_before_high = high;
                     max_before_idx = Some(probe);
@@ -107,16 +110,16 @@ impl PatternDetector for ResistanceBreakoutDetector {
             let mut has_hold = false;
             for probe in idx.saturating_add(1)..=latest_idx {
                 has_hold = true;
-                min_low_after_breakout = min_low_after_breakout.min(series.bar(probe)?.low);
+                min_low_after_breakout = min_low_after_breakout.min(series.low_at(probe)?);
             }
             if has_hold && min_low_after_breakout < support {
                 continue;
             }
-            if !is_bullish(&current) || latest.close <= ma5 {
+            if !is_bullish(series, idx)? || latest_close <= ma5 {
                 continue;
             }
             let days_since_breakout = latest_idx - idx;
-            let volume_expand = current.volume / vol_ma.max(1e-6);
+            let volume_expand = current_volume / vol_ma.max(1e-6);
             let reasons = if days_since_breakout > 0 {
                 vec![
                     format!(
@@ -140,25 +143,25 @@ impl PatternDetector for ResistanceBreakoutDetector {
                         change_pct * 100.0
                     ),
                     format!("突破日成交量放大 {:.1} 倍", volume_expand),
-                    format!("收盘价 {:.2} 站上均线多头排列区间", latest.close),
+                    format!("收盘价 {:.2} 站上均线多头排列区间", latest_close),
                 ]
             };
             return Some(signal(
                 self.id(),
                 series,
-                latest.time,
+                latest_time,
                 0.8,
                 &["breakout", "trend"],
                 "近阶段放量长阳突破阻力位，突破后回踩未失守。",
                 json!({
-                    "breakout_date": current.time.format("%Y-%m-%d").to_string(),
-                    "key_date": current.time.format("%Y-%m-%d").to_string(),
+                    "breakout_date": current_time.format("%Y-%m-%d").to_string(),
+                    "key_date": current_time.format("%Y-%m-%d").to_string(),
                     "key_date_type": "阻力位突破日",
-                    "price": latest.close,
+                    "price": latest_close,
                     "resistance": resistance,
                     "support": support,
                     "breakout_change_pct": change_pct,
-                    "breakout_ratio": (current.close - resistance) / resistance.max(1e-6),
+                    "breakout_ratio": (current_close - resistance) / resistance.max(1e-6),
                     "days_since_breakout": days_since_breakout,
                     "volume_ratio": volume_expand,
                     "ma5": ma5,

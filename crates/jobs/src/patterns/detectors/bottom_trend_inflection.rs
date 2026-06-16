@@ -36,13 +36,13 @@ impl PatternDetector for BottomTrendInflectionDetector {
         // 找出120根窗口里的最高价，作为中期跌幅的起点参考。
         let mut highest = f64::NEG_INFINITY;
         for idx in start..end {
-            highest = highest.max(series.bar(idx)?.high);
+            highest = highest.max(series.high_at(idx)?);
         }
         // 同时找出该最高价所在位置，后面只统计“高点之后”的下跌幅度。
         let mut highest_idx = None;
         let mut highest_value = f64::NEG_INFINITY;
         for idx in start..end {
-            let high = series.bar(idx)?.high;
+            let high = series.high_at(idx)?;
             if high > highest_value {
                 highest_value = high;
                 highest_idx = Some(idx);
@@ -52,7 +52,7 @@ impl PatternDetector for BottomTrendInflectionDetector {
         // 从阶段高点往后看，找出后续最低点，衡量是否经历过明显深跌。
         let mut lowest_after_high = f64::INFINITY;
         for idx in highest_idx..end {
-            lowest_after_high = lowest_after_high.min(series.bar(idx)?.low);
+            lowest_after_high = lowest_after_high.min(series.low_at(idx)?);
         }
         // 计算从阶段高点到后续最低点的跌幅比例。
         let decline = (highest - lowest_after_high) / highest.max(1e-6);
@@ -64,7 +64,7 @@ impl PatternDetector for BottomTrendInflectionDetector {
         let recent_slice = end.saturating_sub(20);
         // 提取最近20根的最低价序列，观察价格是否仍在缓慢下探。
         let recent_lows: Vec<f64> = (recent_slice..end)
-            .filter_map(|idx| series.bar(idx).map(|bar| bar.low))
+            .filter_map(|idx| series.low_at(idx))
             .collect();
         // 提取最近20根的MACD柱序列；缺失值按0处理，避免中断检测。
         let recent_macd: Vec<f64> = indicators.macd_hist[recent_slice..end]
@@ -88,45 +88,48 @@ impl PatternDetector for BottomTrendInflectionDetector {
             let day_change = pct_change(series, surge_idx)?;
             // 读取该日对应的10日均量，衡量是否放量。
             let vol_ma10 = indicators.volume_ma10[surge_idx]?;
-            let surge_bar = series.bar(surge_idx)?;
+            let surge_close = series.close_at(surge_idx)?;
+            let surge_open = series.open_at(surge_idx)?;
+            let surge_volume = series.volume_at(surge_idx)?;
+            let surge_time = series.time_at(surge_idx)?;
             // 涨幅不超过8%或成交量不到10日均量的2.5倍，都不算有效启动。
-            if day_change <= 0.08 || surge_bar.volume < vol_ma10 * 2.5 {
+            if day_change <= 0.08 || surge_volume < vol_ma10 * 2.5 {
                 continue;
             }
 
             // 再找出整个120根窗口内的绝对低点，用来判断启动位置是否仍在底部附近。
             let mut lowest_price = f64::INFINITY;
             for idx in start..end {
-                lowest_price = lowest_price.min(series.bar(idx)?.low);
+                lowest_price = lowest_price.min(series.low_at(idx)?);
             }
             // 计算启动日收盘价距离阶段最低点的偏离比例。
-            let distance_ratio = (surge_bar.close - lowest_price) / lowest_price.max(1e-6);
+            let distance_ratio = (surge_close - lowest_price) / lowest_price.max(1e-6);
             // 如果启动时离最低点已经超过15%，说明更像追高而非底部反转。
             if distance_ratio > 0.15 {
                 continue;
             }
 
             // 把启动日开盘价视为一个短线支撑位。
-            let support_price = surge_bar.open;
+            let support_price = surge_open;
             // 启动日之后的区间从下一根K线开始检查。
             let after_surge_start = surge_idx.saturating_add(1);
             // 如果后续又跌破启动日开盘价，说明支撑不稳，反转信号失效。
             if after_surge_start < end
                 && (after_surge_start..end)
-                    .any(|idx| series.bar(idx).is_some_and(|bar| bar.low < support_price))
+                    .any(|idx| series.low_at(idx).is_some_and(|low| low < support_price))
             {
                 continue;
             }
 
             // 所有条件满足后，构造并返回一个底部趋势拐点信号。
-            let latest_bar = series.bar(end - 1)?;
+            let latest_time = series.time_at(end - 1)?;
             return Some(signal(
                 // 信号ID，对应当前检测器名称。
                 self.id(),
                 // 原始序列信息，便于写入标的与交易所等上下文。
                 series,
                 // 信号日期使用最新一根K线日期，而不是启动日日期。
-                latest_bar.time,
+                latest_time,
                 // 当前规则给一个固定置信分数。
                 0.78,
                 // 给信号打上“底部”“反转”标签。
@@ -136,9 +139,9 @@ impl PatternDetector for BottomTrendInflectionDetector {
                 // 附带关键证据，便于后续排查与展示。
                 json!({
                     "decline_ratio": decline,
-                    "surge_date": surge_bar.time.format("%Y-%m-%d").to_string(),
+                    "surge_date": surge_time.format("%Y-%m-%d").to_string(),
                     "surge_change_pct": day_change,
-                    "volume_ratio": surge_bar.volume / vol_ma10,
+                    "volume_ratio": surge_volume / vol_ma10,
                     "distance_from_low": distance_ratio,
                     "support_price": support_price,
                     "price_slope": price_reg.0,

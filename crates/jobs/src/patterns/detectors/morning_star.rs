@@ -43,25 +43,33 @@ impl PatternDetector for MorningStarDetector {
         if idx < 2 {
             return None;
         }
-        let first_candle = series.bar(idx - 2)?;
-        let second_candle = series.bar(idx - 1)?;
-        let third_candle = series.bar(idx)?;
+        let first_open = series.open_at(idx - 2)?;
+        let first_close = series.close_at(idx - 2)?;
+        let first_time = series.time_at(idx - 2)?;
+        let second_open = series.open_at(idx - 1)?;
+        let second_close = series.close_at(idx - 1)?;
+        let second_volume = series.volume_at(idx - 1)?;
+        let second_time = series.time_at(idx - 1)?;
+        let third_open = series.open_at(idx)?;
+        let third_close = series.close_at(idx)?;
+        let third_volume = series.volume_at(idx)?;
+        let third_time = series.time_at(idx)?;
         let ma5 = indicators.ma5[idx]?;
 
-        let first_body = body_ratio(&first_candle);
-        let second_body = body_ratio(&second_candle);
-        let third_change = (third_candle.close - third_candle.open) / third_candle.open.max(1e-6);
-        if !is_bullish(&third_candle)
+        let first_body = body_ratio(series, idx - 2)?;
+        let second_body = body_ratio(series, idx - 1)?;
+        let third_change = (third_close - third_open) / third_open.max(1e-6);
+        if !is_bullish(series, idx)?
             || third_change <= 0.05
-            || third_candle.close <= ma5
-            || !is_bearish(&first_candle)
+            || third_close <= ma5
+            || !is_bearish(series, idx - 2)?
             || first_body < self.first_body_threshold
             || second_body > first_body * self.small_body_ratio
         {
             return None;
         }
 
-        let volume_ratio = third_candle.volume / second_candle.volume.max(1e-6);
+        let volume_ratio = third_volume / second_volume.max(1e-6);
         if volume_ratio < self.volume_ratio {
             return None;
         }
@@ -69,24 +77,24 @@ impl PatternDetector for MorningStarDetector {
         Some(signal(
             self.id(),
             series,
-            third_candle.time,
+            third_time,
             0.74,
             &["reversal", "candlestick"],
             "最近三根K线形成启明星，第三根长阳突破5日线并放量确认。",
             json!({
-                "key_date": third_candle.time.format("%Y-%m-%d").to_string(),
-                "first_candle_date": first_candle.time.format("%Y-%m-%d").to_string(),
-                "first_candle_open": first_candle.open,
-                "first_candle_close": first_candle.close,
-                "second_candle_date": second_candle.time.format("%Y-%m-%d").to_string(),
-                "second_candle_open": second_candle.open,
-                "second_candle_close": second_candle.close,
-                "third_candle_date": third_candle.time.format("%Y-%m-%d").to_string(),
-                "third_candle_open": third_candle.open,
-                "third_candle_close": third_candle.close,
-                "first_bear_body": first_body,
-                "middle_body": second_body,
-                "confirm_change_pct": third_change,
+                    "key_date": third_time.format("%Y-%m-%d").to_string(),
+                    "first_candle_date": first_time.format("%Y-%m-%d").to_string(),
+                    "first_candle_open": first_open,
+                    "first_candle_close": first_close,
+                    "second_candle_date": second_time.format("%Y-%m-%d").to_string(),
+                    "second_candle_open": second_open,
+                    "second_candle_close": second_close,
+                    "third_candle_date": third_time.format("%Y-%m-%d").to_string(),
+                    "third_candle_open": third_open,
+                    "third_candle_close": third_close,
+                    "first_bear_body": first_body,
+                    "middle_body": second_body,
+                    "confirm_change_pct": third_change,
                 "ma5": ma5,
                 "volume_ratio": volume_ratio,
                 "reasons": [

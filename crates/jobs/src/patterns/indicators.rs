@@ -126,16 +126,16 @@ fn f64_values(series: &BarSeries, column: &str) -> Vec<f64> {
         })
         .unwrap_or_else(|| match column {
             "close" => (0..series.len())
-                .filter_map(|idx| series.bar(idx).map(|bar| bar.close))
+                .filter_map(|idx| series.close_at(idx))
                 .collect(),
             "high" => (0..series.len())
-                .filter_map(|idx| series.bar(idx).map(|bar| bar.high))
+                .filter_map(|idx| series.high_at(idx))
                 .collect(),
             "low" => (0..series.len())
-                .filter_map(|idx| series.bar(idx).map(|bar| bar.low))
+                .filter_map(|idx| series.low_at(idx))
                 .collect(),
             "volume" => (0..series.len())
-                .filter_map(|idx| series.bar(idx).map(|bar| bar.volume))
+                .filter_map(|idx| series.volume_at(idx))
                 .collect(),
             _ => Vec::new(),
         })

@@ -12,8 +12,8 @@
 use serde_json::json;
 
 use super::common::{latest_idx, signal};
+use super::common::{ma, volume_ma};
 use super::PatternDetector;
-use crate::patterns::indicators::SeriesIndicators;
 use crate::patterns::model::{BarSeries, PatternSignal};
 
 #[derive(Debug, Clone, Default)]
@@ -24,7 +24,11 @@ impl PatternDetector for Strategy2560SelectionDetector {
         "strategy_2560_selection"
     }
 
-    fn detect(&self, series: &BarSeries, indicators: &SeriesIndicators) -> Option<PatternSignal> {
+    fn detect(
+        &self,
+        series: &BarSeries,
+        indicators: &polars::prelude::DataFrame,
+    ) -> Option<PatternSignal> {
         let idx = latest_idx(series);
         if idx < 1 {
             return None;
@@ -33,13 +37,13 @@ impl PatternDetector for Strategy2560SelectionDetector {
         let prev_close = series.close_at(idx - 1)?;
         let latest_volume = series.volume_at(idx)?;
         let latest_time = series.time_at(idx)?;
-        let ma25 = indicators.ma25[idx]?;
-        let prev_ma25 = indicators.ma25[idx - 1]?;
-        let vol_ma5 = indicators.volume_ma5[idx]?;
-        let vol_ma60 = indicators.volume_ma60[idx]?;
-        let prev_vol_ma5 = indicators.volume_ma5[idx - 1]?;
-        let prev_vol_ma60 = indicators.volume_ma60[idx - 1]?;
-        let ma10 = indicators.ma10[idx]?;
+        let ma25 = ma(indicators, idx, 25)?;
+        let prev_ma25 = ma(indicators, idx - 1, 25)?;
+        let vol_ma5 = volume_ma(indicators, idx, 5)?;
+        let vol_ma60 = volume_ma(indicators, idx, 60)?;
+        let prev_vol_ma5 = volume_ma(indicators, idx - 1, 5)?;
+        let prev_vol_ma60 = volume_ma(indicators, idx - 1, 60)?;
+        let ma10 = ma(indicators, idx, 10)?;
         let price_change = (latest_close - prev_close) / prev_close.max(1e-6);
         let price_break = latest_close > ma25 && prev_close <= prev_ma25;
         let vol_cross = vol_ma5 > vol_ma60 && prev_vol_ma5 <= prev_vol_ma60;

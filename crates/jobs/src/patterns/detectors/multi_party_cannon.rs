@@ -12,8 +12,8 @@
 use serde_json::json;
 
 use super::common::{body_ratio, is_bearish, is_bullish, latest_idx, signal};
+use super::common::{kdj_j, ma, macd_hist, volume_ma};
 use super::PatternDetector;
-use crate::patterns::indicators::SeriesIndicators;
 use crate::patterns::model::{BarSeries, PatternSignal};
 
 #[derive(Debug, Clone)]
@@ -58,7 +58,11 @@ impl PatternDetector for MultiPartyCannonDetector {
         "multi_party_cannon"
     }
 
-    fn detect(&self, series: &BarSeries, indicators: &SeriesIndicators) -> Option<PatternSignal> {
+    fn detect(
+        &self,
+        series: &BarSeries,
+        indicators: &polars::prelude::DataFrame,
+    ) -> Option<PatternSignal> {
         let idx = latest_idx(series);
         if idx < 2 {
             return None;
@@ -72,10 +76,10 @@ impl PatternDetector for MultiPartyCannonDetector {
         let third_close = series.close_at(idx)?;
         let third_volume = series.volume_at(idx)?;
         let third_time = series.time_at(idx)?;
-        let ma20 = indicators.ma20[idx];
-        let vol_ma5 = indicators.volume_ma5[idx];
-        let macd_hist = indicators.macd_hist[idx];
-        let j = indicators.j[idx];
+        let ma20 = ma(indicators, idx, 20);
+        let vol_ma5 = volume_ma(indicators, idx, 5);
+        let macd_hist = macd_hist(indicators, idx, 12, 26, 9);
+        let j = kdj_j(indicators, idx, 9, 3, 3);
 
         let first_rise = (first_close - first_open) / first_open.max(1e-6);
         let third_rise = (third_close - third_open) / third_open.max(1e-6);

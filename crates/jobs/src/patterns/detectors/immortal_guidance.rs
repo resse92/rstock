@@ -12,8 +12,8 @@
 use serde_json::json;
 
 use super::common::{latest_idx, linear_regression_metrics, signal};
+use super::common::{ma, volume_ma};
 use super::PatternDetector;
-use crate::patterns::indicators::SeriesIndicators;
 use crate::patterns::model::{BarSeries, PatternSignal};
 
 #[derive(Debug, Clone)]
@@ -46,7 +46,11 @@ impl PatternDetector for ImmortalGuidanceDetector {
         "immortal_guidance"
     }
 
-    fn detect(&self, series: &BarSeries, indicators: &SeriesIndicators) -> Option<PatternSignal> {
+    fn detect(
+        &self,
+        series: &BarSeries,
+        indicators: &polars::prelude::DataFrame,
+    ) -> Option<PatternSignal> {
         if series.len() < self.trend_lookback_days.max(4) {
             return None;
         }
@@ -54,7 +58,7 @@ impl PatternDetector for ImmortalGuidanceDetector {
         let today_close = series.close_at(idx)?;
         let today_volume = series.volume_at(idx)?;
         let today_time = series.time_at(idx)?;
-        let today_ma5 = indicators.ma5[idx]?;
+        let today_ma5 = ma(indicators, idx, 5)?;
         if today_close < today_ma5 || today_volume <= 0.0 {
             return None;
         }
@@ -79,10 +83,10 @@ impl PatternDetector for ImmortalGuidanceDetector {
             let surge = (signal_high - prev_close) / prev_close.max(1e-6);
             let upper_shadow = signal_high - signal_open.max(signal_close);
             let shadow_ratio = upper_shadow / signal_high.max(1e-6);
-            let volume_ma5 = indicators.volume_ma5[signal_idx]?;
-            let ma5 = indicators.ma5[signal_idx]?;
-            let ma10 = indicators.ma10[signal_idx]?;
-            let ma20 = indicators.ma20[signal_idx]?;
+            let volume_ma5 = volume_ma(indicators, signal_idx, 5)?;
+            let ma5 = ma(indicators, signal_idx, 5)?;
+            let ma10 = ma(indicators, signal_idx, 10)?;
+            let ma20 = ma(indicators, signal_idx, 20)?;
             let signal_volume_ratio = signal_volume / volume_ma5.max(1e-6);
             if surge < self.surge_threshold
                 || shadow_ratio < self.upper_shadow_ratio
@@ -98,8 +102,10 @@ impl PatternDetector for ImmortalGuidanceDetector {
                     .take(idx - signal_idx)
                     .all(|idx| series.close_at(idx).is_some_and(|close| close < anti_body))
             {
-                let today_volume_ratio =
-                    today_volume / indicators.volume_ma5[idx].unwrap_or(today_volume).max(1e-6);
+                let today_volume_ratio = today_volume
+                    / volume_ma(indicators, idx, 5)
+                        .unwrap_or(today_volume)
+                        .max(1e-6);
                 return Some(signal(
                     self.id(),
                     series,

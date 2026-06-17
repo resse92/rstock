@@ -12,8 +12,8 @@
 use serde_json::json;
 
 use super::common::{is_bullish, latest_idx, pct_change, signal, window_high, window_low};
+use super::common::{kdj_d, kdj_k, macd_dea, macd_dif, volume_ma};
 use super::PatternDetector;
-use crate::patterns::indicators::SeriesIndicators;
 use crate::patterns::model::{BarSeries, PatternSignal};
 
 #[derive(Debug, Clone)]
@@ -54,7 +54,11 @@ impl PatternDetector for LimitUpSidewaysDetector {
         "limit_up_sideways"
     }
 
-    fn detect(&self, series: &BarSeries, indicators: &SeriesIndicators) -> Option<PatternSignal> {
+    fn detect(
+        &self,
+        series: &BarSeries,
+        indicators: &polars::prelude::DataFrame,
+    ) -> Option<PatternSignal> {
         if series.len() < 15 {
             return None;
         }
@@ -69,7 +73,7 @@ impl PatternDetector for LimitUpSidewaysDetector {
             let limit_volume = series.volume_at(limit_idx)?;
             let limit_close = series.close_at(limit_idx)?;
             let limit_time = series.time_at(limit_idx)?;
-            let vol_ma = indicators.volume_ma5[limit_idx]?;
+            let vol_ma = volume_ma(indicators, limit_idx, 5)?;
             if limit_volume < vol_ma * self.volume_ratio_threshold {
                 continue;
             }
@@ -114,14 +118,14 @@ impl PatternDetector for LimitUpSidewaysDetector {
             if latest_close <= prev_close || volume_increase < self.volume_increase_ratio {
                 continue;
             }
-            let k = indicators.k[latest_idx]?;
-            let d = indicators.d[latest_idx]?;
-            let prev_k = indicators.k[latest_idx - 1]?;
-            let prev_d = indicators.d[latest_idx - 1]?;
-            let dif = indicators.dif[latest_idx]?;
-            let dea = indicators.dea[latest_idx]?;
-            let prev_dif = indicators.dif[latest_idx - 1]?;
-            let prev_dea = indicators.dea[latest_idx - 1]?;
+            let k = kdj_k(indicators, latest_idx, 9, 3, 3)?;
+            let d = kdj_d(indicators, latest_idx, 9, 3, 3)?;
+            let prev_k = kdj_k(indicators, latest_idx - 1, 9, 3, 3)?;
+            let prev_d = kdj_d(indicators, latest_idx - 1, 9, 3, 3)?;
+            let dif = macd_dif(indicators, latest_idx, 12, 26)?;
+            let dea = macd_dea(indicators, latest_idx, 12, 26, 9)?;
+            let prev_dif = macd_dif(indicators, latest_idx - 1, 12, 26)?;
+            let prev_dea = macd_dea(indicators, latest_idx - 1, 12, 26, 9)?;
             let kdj_cross = prev_k <= prev_d && k > d && k < self.kdj_gold_cross_threshold;
             let macd_cross = prev_dif <= prev_dea && dif > dea;
             if !is_bullish(series, latest_idx)? || !(kdj_cross || macd_cross) {

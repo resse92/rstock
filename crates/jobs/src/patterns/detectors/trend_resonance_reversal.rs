@@ -12,8 +12,8 @@
 use serde_json::json;
 
 use super::common::{latest_idx, signal};
+use super::common::{ma, macd_dea, macd_dif, rsi};
 use super::PatternDetector;
-use crate::patterns::indicators::SeriesIndicators;
 use crate::patterns::model::{BarSeries, PatternSignal};
 
 #[derive(Debug, Clone)]
@@ -40,7 +40,11 @@ impl PatternDetector for TrendResonanceReversalDetector {
         "trend_resonance_reversal"
     }
 
-    fn detect(&self, series: &BarSeries, indicators: &SeriesIndicators) -> Option<PatternSignal> {
+    fn detect(
+        &self,
+        series: &BarSeries,
+        indicators: &polars::prelude::DataFrame,
+    ) -> Option<PatternSignal> {
         let idx = latest_idx(series);
         if idx < 30 {
             return None;
@@ -52,8 +56,8 @@ impl PatternDetector for TrendResonanceReversalDetector {
             if day == 0 {
                 continue;
             }
-            let rsi_now = indicators.rsi14[day]?;
-            let rsi_prev = indicators.rsi14[day - 1]?;
+            let rsi_now = rsi(indicators, day, 14)?;
+            let rsi_prev = rsi(indicators, day - 1, 14)?;
             if rsi_now < self.rsi_breakout || rsi_prev >= self.rsi_breakout {
                 continue;
             }
@@ -61,7 +65,7 @@ impl PatternDetector for TrendResonanceReversalDetector {
             let lookback_start = day.saturating_sub(self.lookback_days);
             let mut min_rsi = f64::INFINITY;
             for probe in lookback_start..day {
-                if let Some(value) = indicators.rsi14[probe] {
+                if let Some(value) = rsi(indicators, probe, 14) {
                     min_rsi = min_rsi.min(value);
                 }
             }
@@ -80,14 +84,15 @@ impl PatternDetector for TrendResonanceReversalDetector {
                 continue;
             }
             if ma_cross_day.is_none()
-                && indicators.ma5[day]? > indicators.ma20[day]?
-                && indicators.ma5[day - 1]? <= indicators.ma20[day - 1]?
+                && ma(indicators, day, 5)? > ma(indicators, day, 20)?
+                && ma(indicators, day - 1, 5)? <= ma(indicators, day - 1, 20)?
             {
                 ma_cross_day = Some(day);
             }
             if macd_cross_day.is_none()
-                && indicators.dif[day]? > indicators.dea[day]?
-                && indicators.dif[day - 1]? <= indicators.dea[day - 1]?
+                && macd_dif(indicators, day, 12, 26)? > macd_dea(indicators, day, 12, 26, 9)?
+                && macd_dif(indicators, day - 1, 12, 26)?
+                    <= macd_dea(indicators, day - 1, 12, 26, 9)?
             {
                 macd_cross_day = Some(day);
             }
@@ -117,11 +122,11 @@ impl PatternDetector for TrendResonanceReversalDetector {
                 "rsi_breakout_day": series.time_at(rsi_day)?.format("%Y-%m-%d").to_string(),
                 "ma_cross_day": series.time_at(ma_day)?.format("%Y-%m-%d").to_string(),
                 "macd_cross_day": series.time_at(macd_day)?.format("%Y-%m-%d").to_string(),
-                "rsi_value": indicators.rsi14[rsi_day],
-                "ma_short": indicators.ma5[ma_day],
-                "ma_long": indicators.ma20[ma_day],
-                "macd_dif": indicators.dif[macd_day],
-                "macd_dea": indicators.dea[macd_day],
+                "rsi_value": rsi(indicators, rsi_day, 14),
+                "ma_short": ma(indicators, ma_day, 5),
+                "ma_long": ma(indicators, ma_day, 20),
+                "macd_dif": macd_dif(indicators, macd_day, 12, 26),
+                "macd_dea": macd_dea(indicators, macd_day, 12, 26, 9),
                 "close": series.close_at(rsi_day)?,
                 "max_time_diff": max_day - min_day,
                 "reasons": [

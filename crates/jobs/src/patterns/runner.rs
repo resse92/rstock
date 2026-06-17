@@ -12,7 +12,7 @@ use crate::api::ApiClient;
 use crate::kline_frame::{concat_frames, frame_symbols};
 use crate::models::MarketRequest;
 use crate::patterns::detectors::PatternDetector;
-use crate::patterns::indicators::SeriesIndicators;
+use crate::patterns::indicators::{compute_indicators, IndicatorSpec};
 use crate::patterns::model::{
     BarSeries, PatternScanFailure, PatternScanReport, PatternScanRequest, PatternSignal,
 };
@@ -375,7 +375,9 @@ fn scan_symbol(
         };
     }
 
-    let indicators = SeriesIndicators::calculate(&series);
+    let indicators =
+        compute_indicators(series.frame.clone(), &IndicatorSpec::default_pattern_set())
+            .expect("default pattern indicators should be computable");
     let signals = detectors
         .iter()
         .filter_map(|detector| detector.detect(&series, &indicators))

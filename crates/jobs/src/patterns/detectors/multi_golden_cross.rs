@@ -11,9 +11,11 @@
 
 use serde_json::json;
 
+use super::common::{
+    bull_bear_line, kdj_d, kdj_j, kdj_k, ma, macd_dea, macd_dif, macd_hist, short_trend, volume_ma,
+};
 use super::common::{latest_idx, signal};
 use super::PatternDetector;
-use crate::patterns::indicators::SeriesIndicators;
 use crate::patterns::model::{BarSeries, PatternSignal};
 
 #[derive(Debug, Clone)]
@@ -38,7 +40,11 @@ impl PatternDetector for MultiGoldenCrossDetector {
         "multi_golden_cross"
     }
 
-    fn detect(&self, series: &BarSeries, indicators: &SeriesIndicators) -> Option<PatternSignal> {
+    fn detect(
+        &self,
+        series: &BarSeries,
+        indicators: &polars::prelude::DataFrame,
+    ) -> Option<PatternSignal> {
         let idx = latest_idx(series);
         if idx < 3 {
             return None;
@@ -51,18 +57,19 @@ impl PatternDetector for MultiGoldenCrossDetector {
             if day == 0 {
                 continue;
             }
-            if indicators.ma5[day]? > indicators.ma20[day]?
-                && indicators.ma5[day - 1]? <= indicators.ma20[day - 1]?
+            if ma(indicators, day, 5)? > ma(indicators, day, 20)?
+                && ma(indicators, day - 1, 5)? <= ma(indicators, day - 1, 20)?
             {
                 ma_cross_day = Some(day);
             }
-            if indicators.k[day]? > indicators.d[day]?
-                && indicators.k[day - 1]? <= indicators.d[day - 1]?
+            if kdj_k(indicators, day, 9, 3, 3)? > kdj_d(indicators, day, 9, 3, 3)?
+                && kdj_k(indicators, day - 1, 9, 3, 3)? <= kdj_d(indicators, day - 1, 9, 3, 3)?
             {
                 kdj_cross_day = Some(day);
             }
-            if indicators.dif[day]? > indicators.dea[day]?
-                && indicators.dif[day - 1]? <= indicators.dea[day - 1]?
+            if macd_dif(indicators, day, 12, 26)? > macd_dea(indicators, day, 12, 26, 9)?
+                && macd_dif(indicators, day - 1, 12, 26)?
+                    <= macd_dea(indicators, day - 1, 12, 26, 9)?
             {
                 macd_cross_day = Some(day);
             }
@@ -73,17 +80,17 @@ impl PatternDetector for MultiGoldenCrossDetector {
         let latest_close = series.close_at(idx)?;
         let latest_volume = series.volume_at(idx)?;
         let latest_time = series.time_at(idx)?;
-        let ma5 = indicators.ma5[idx]?;
-        let ma20 = indicators.ma20[idx]?;
-        let k = indicators.k[idx]?;
-        let d = indicators.d[idx]?;
-        let j = indicators.j[idx]?;
-        let dif = indicators.dif[idx]?;
-        let dea = indicators.dea[idx]?;
-        let macd = indicators.macd_hist[idx]?;
-        let vol_ma5 = indicators.volume_ma5[idx]?;
-        let short_trend = indicators.short_trend[idx]?;
-        let bull_bear = indicators.bull_bear_line[idx]?;
+        let ma5 = ma(indicators, idx, 5)?;
+        let ma20 = ma(indicators, idx, 20)?;
+        let k = kdj_k(indicators, idx, 9, 3, 3)?;
+        let d = kdj_d(indicators, idx, 9, 3, 3)?;
+        let j = kdj_j(indicators, idx, 9, 3, 3)?;
+        let dif = macd_dif(indicators, idx, 12, 26)?;
+        let dea = macd_dea(indicators, idx, 12, 26, 9)?;
+        let macd = macd_hist(indicators, idx, 12, 26, 9)?;
+        let vol_ma5 = volume_ma(indicators, idx, 5)?;
+        let short_trend = short_trend(indicators, idx, 10, 10)?;
+        let bull_bear = bull_bear_line(indicators, idx, [14, 28, 57, 114])?;
         let volume_ratio = latest_volume / vol_ma5.max(1e-6);
         let max_gap = max_day - min_day;
         if max_gap <= self.resonance_days

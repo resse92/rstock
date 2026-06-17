@@ -11,9 +11,9 @@
 
 use serde_json::json;
 
+use super::common::{boll_mid, ma, macd_dea, macd_dif, volume_ma};
 use super::common::{is_bullish, latest_idx, signal};
 use super::PatternDetector;
-use crate::patterns::indicators::SeriesIndicators;
 use crate::patterns::model::{BarSeries, PatternSignal};
 
 #[derive(Debug, Clone)]
@@ -32,7 +32,11 @@ impl PatternDetector for TrendStartDetector {
         "trend_start"
     }
 
-    fn detect(&self, series: &BarSeries, indicators: &SeriesIndicators) -> Option<PatternSignal> {
+    fn detect(
+        &self,
+        series: &BarSeries,
+        indicators: &polars::prelude::DataFrame,
+    ) -> Option<PatternSignal> {
         let idx = latest_idx(series);
         if idx < 1 {
             return None;
@@ -41,14 +45,14 @@ impl PatternDetector for TrendStartDetector {
         let yesterday_close = series.close_at(idx - 1)?;
         let today_volume = series.volume_at(idx)?;
         let today_time = series.time_at(idx)?;
-        let dif_today = indicators.dif[idx]?;
-        let dif_yesterday = indicators.dif[idx - 1]?;
-        let dea_today = indicators.dea[idx]?;
-        let dea_yesterday = indicators.dea[idx - 1]?;
-        let boll_today = indicators.boll_mid[idx]?;
-        let boll_yesterday = indicators.boll_mid[idx - 1]?;
-        let ma5 = indicators.ma5[idx]?;
-        let volume_ma5 = indicators.volume_ma5[idx]?;
+        let dif_today = macd_dif(indicators, idx, 12, 26)?;
+        let dif_yesterday = macd_dif(indicators, idx - 1, 12, 26)?;
+        let dea_today = macd_dea(indicators, idx, 12, 26, 9)?;
+        let dea_yesterday = macd_dea(indicators, idx - 1, 12, 26, 9)?;
+        let boll_today = boll_mid(indicators, idx, 20)?;
+        let boll_yesterday = boll_mid(indicators, idx - 1, 20)?;
+        let ma5 = ma(indicators, idx, 5)?;
+        let volume_ma5 = volume_ma(indicators, idx, 5)?;
         let volume_ratio = today_volume / volume_ma5.max(1e-6);
 
         let macd_cross = dif_today > 0.0 && dif_yesterday <= dea_yesterday && dif_today > dea_today;

@@ -52,7 +52,9 @@ pub async fn start_whole_quote_forwarder(
     req: Option<Json<WholeQuoteStartRequest>>,
 ) -> Result<Json<ApiResponse>, ApiError> {
     if !state.args.quote_forwarder_enabled {
-        return Err(ApiError::from(anyhow!("whole quote forwarder is disabled by config")));
+        return Err(ApiError::from(anyhow!(
+            "whole quote forwarder is disabled by config"
+        )));
     }
 
     let sector_name = normalize_sector_name(req.and_then(|Json(body)| body.sector_name));
@@ -89,7 +91,9 @@ pub async fn stop_whole_quote_forwarder(
 ) -> Result<Json<ApiResponse>, ApiError> {
     let mut subscription = state.whole_quote.lock().await;
     let Some(handle) = subscription.handle.take() else {
-        return Err(ApiError::from(anyhow!("whole quote forwarder is not running")));
+        return Err(ApiError::from(anyhow!(
+            "whole quote forwarder is not running"
+        )));
     };
 
     handle.abort();
@@ -160,8 +164,13 @@ async fn run_forwarder_loop(state: AppState, symbols: Vec<String>) {
             }
         }
 
-        match run_forwarder_once(&state, &client, nats.as_ref().expect("nats connected"), &symbols)
-            .await
+        match run_forwarder_once(
+            &state,
+            &client,
+            nats.as_ref().expect("nats connected"),
+            &symbols,
+        )
+        .await
         {
             Ok(()) => {}
             Err(err) => error!(
@@ -197,7 +206,10 @@ async fn run_forwarder_once(
     .await?;
     let snapshot_elapsed = snapshot_started_at.elapsed();
     let publish_started_at = Instant::now();
-    let snapshot_count = responses.iter().map(|snapshots| snapshots.len()).sum::<usize>();
+    let snapshot_count = responses
+        .iter()
+        .map(|snapshots| snapshots.len())
+        .sum::<usize>();
     let mut published_count = 0usize;
     let batch_count = symbol_batches.len();
 
@@ -283,13 +295,8 @@ fn build_qmt_client(state: &AppState) -> Result<QmtClient> {
         .map_err(|err| anyhow!("failed to initialize qmt grpc client: {err}"))
 }
 
-async fn publish_tick(
-    nats: &async_nats::Client,
-    subject: &str,
-    payload: Vec<u8>,
-) -> Result<()> {
-    nats
-        .publish(subject.to_string(), payload.into())
+async fn publish_tick(nats: &async_nats::Client, subject: &str, payload: Vec<u8>) -> Result<()> {
+    nats.publish(subject.to_string(), payload.into())
         .await
         .with_context(|| format!("publish tick to nats failed: {subject}"))?;
     Ok(())
@@ -411,7 +418,10 @@ fn split_symbol(symbol: &str) -> Option<(String, String)> {
 }
 
 fn is_market(value: &str) -> bool {
-    matches!(value.trim().to_ascii_uppercase().as_str(), "SH" | "SZ" | "BJ")
+    matches!(
+        value.trim().to_ascii_uppercase().as_str(),
+        "SH" | "SZ" | "BJ"
+    )
 }
 
 fn is_code(value: &str) -> bool {

@@ -11,9 +11,9 @@
 
 use serde_json::json;
 
+use super::common::{ma, volume_ma};
 use super::common::{pct_change, signal, window_high};
 use super::PatternDetector;
-use crate::patterns::indicators::SeriesIndicators;
 use crate::patterns::model::{BarSeries, PatternSignal};
 
 #[derive(Debug, Clone)]
@@ -48,7 +48,11 @@ impl PatternDetector for WBottomDetector {
         "w_bottom"
     }
 
-    fn detect(&self, series: &BarSeries, indicators: &SeriesIndicators) -> Option<PatternSignal> {
+    fn detect(
+        &self,
+        series: &BarSeries,
+        indicators: &polars::prelude::DataFrame,
+    ) -> Option<PatternSignal> {
         if series.len() < self.pattern_days {
             return None;
         }
@@ -93,7 +97,7 @@ impl PatternDetector for WBottomDetector {
         let break_search_start = end.saturating_sub(5);
         for idx in break_search_start..end {
             let change = pct_change(series, idx)?;
-            let vol_ma = indicators.volume_ma5[idx]?;
+            let vol_ma = volume_ma(indicators, idx, 5)?;
             let current_close = series.close_at(idx)?;
             let current_volume = series.volume_at(idx)?;
             if change > 0.08
@@ -108,7 +112,7 @@ impl PatternDetector for WBottomDetector {
         }
         let break_idx = break_idx?;
 
-        let trend_ok = indicators.ma10[latest_idx]? > indicators.ma30[latest_idx]?;
+        let trend_ok = ma(indicators, latest_idx, 10)? > ma(indicators, latest_idx, 30)?;
         if !trend_ok {
             return None;
         }
@@ -165,14 +169,14 @@ impl PatternDetector for WBottomDetector {
                     "break_date": break_time.format("%Y-%m-%d").to_string(),
                     "neckline": neckline,
                     "bottom_diff_ratio": diff,
-                    "break_volume_ratio": break_volume / indicators.volume_ma5[break_idx]?.max(1e-6),
+                    "break_volume_ratio": break_volume / volume_ma(indicators, break_idx, 5)?.max(1e-6),
                     "support_price": support_price,
                     "trend_reversal": trend_ok,
                     "volume_shrink": volume_shrink,
                     "volume_shrink_ratio": volume_shrink_ratio,
                     "reasons": [
                         format!("双底价差 {:.2}%，间隔 {} 天", diff * 100.0, l2 - l1),
-                        format!("颈线 {:.2}，突破日放量 {:.2} 倍", neckline, break_volume / indicators.volume_ma5[break_idx]?.max(1e-6)),
+                        format!("颈线 {:.2}，突破日放量 {:.2} 倍", neckline, break_volume / volume_ma(indicators, break_idx, 5)?.max(1e-6)),
                         format!("突破后支撑位 {:.2} 未被跌破", support_price),
                     ],
                 }),

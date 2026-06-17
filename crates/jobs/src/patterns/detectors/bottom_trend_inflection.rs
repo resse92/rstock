@@ -13,8 +13,8 @@
 use serde_json::json;
 
 use super::common::{linear_regression_metrics, pct_change, signal};
+use super::common::{macd_hist, volume_ma};
 use super::PatternDetector;
-use crate::patterns::indicators::SeriesIndicators;
 use crate::patterns::model::{BarSeries, PatternSignal};
 
 #[derive(Debug, Clone, Default)]
@@ -25,7 +25,11 @@ impl PatternDetector for BottomTrendInflectionDetector {
         "bottom_trend_inflection"
     }
 
-    fn detect(&self, series: &BarSeries, indicators: &SeriesIndicators) -> Option<PatternSignal> {
+    fn detect(
+        &self,
+        series: &BarSeries,
+        indicators: &polars::prelude::DataFrame,
+    ) -> Option<PatternSignal> {
         // 至少需要120根K线，才能完成“半年深跌 + 底部拐点”的判断。
         if series.len() < 120 {
             return None;
@@ -67,9 +71,8 @@ impl PatternDetector for BottomTrendInflectionDetector {
             .filter_map(|idx| series.low_at(idx))
             .collect();
         // 提取最近20根的MACD柱序列；缺失值按0处理，避免中断检测。
-        let recent_macd: Vec<f64> = indicators.macd_hist[recent_slice..end]
-            .iter()
-            .map(|value| value.unwrap_or(0.0))
+        let recent_macd: Vec<f64> = (recent_slice..end)
+            .map(|idx| macd_hist(indicators, idx, 12, 26, 9).unwrap_or(0.0))
             .collect();
         // 对价格低点做线性回归，得到价格趋势斜率与拟合度。
         let price_reg = linear_regression_metrics(&recent_lows)?;
@@ -87,7 +90,7 @@ impl PatternDetector for BottomTrendInflectionDetector {
             // 计算该日相对前一日的涨幅。
             let day_change = pct_change(series, surge_idx)?;
             // 读取该日对应的10日均量，衡量是否放量。
-            let vol_ma10 = indicators.volume_ma10[surge_idx]?;
+            let vol_ma10 = volume_ma(indicators, surge_idx, 10)?;
             let surge_close = series.close_at(surge_idx)?;
             let surge_open = series.open_at(surge_idx)?;
             let surge_volume = series.volume_at(surge_idx)?;

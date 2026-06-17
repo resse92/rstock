@@ -11,9 +11,9 @@
 
 use serde_json::json;
 
+use super::common::ma;
 use super::common::{body_ratio, is_bearish, is_bullish, latest_idx, signal};
 use super::PatternDetector;
-use crate::patterns::indicators::SeriesIndicators;
 use crate::patterns::model::{BarSeries, PatternSignal};
 
 #[derive(Debug, Clone)]
@@ -38,7 +38,11 @@ impl PatternDetector for MorningStarDetector {
         "morning_star"
     }
 
-    fn detect(&self, series: &BarSeries, indicators: &SeriesIndicators) -> Option<PatternSignal> {
+    fn detect(
+        &self,
+        series: &BarSeries,
+        indicators: &polars::prelude::DataFrame,
+    ) -> Option<PatternSignal> {
         let idx = latest_idx(series);
         if idx < 2 {
             return None;
@@ -54,7 +58,7 @@ impl PatternDetector for MorningStarDetector {
         let third_close = series.close_at(idx)?;
         let third_volume = series.volume_at(idx)?;
         let third_time = series.time_at(idx)?;
-        let ma5 = indicators.ma5[idx]?;
+        let ma5 = ma(indicators, idx, 5)?;
 
         let first_body = body_ratio(series, idx - 2)?;
         let second_body = body_ratio(series, idx - 1)?;

@@ -11,9 +11,9 @@
 
 use serde_json::json;
 
+use super::common::volume_ma;
 use super::common::{is_bullish, latest_idx, pct_change, signal, window_high, window_low};
 use super::PatternDetector;
-use crate::patterns::indicators::SeriesIndicators;
 use crate::patterns::model::{BarSeries, PatternSignal};
 
 #[derive(Debug, Clone)]
@@ -48,7 +48,11 @@ impl PatternDetector for LimitUpPullbackDetector {
         "limit_up_pullback"
     }
 
-    fn detect(&self, series: &BarSeries, indicators: &SeriesIndicators) -> Option<PatternSignal> {
+    fn detect(
+        &self,
+        series: &BarSeries,
+        indicators: &polars::prelude::DataFrame,
+    ) -> Option<PatternSignal> {
         if series.len() < 12 {
             return None;
         }
@@ -137,7 +141,7 @@ impl PatternDetector for LimitUpPullbackDetector {
                     .is_some_and(|volume| volume <= shrink_threshold)
             });
 
-            let vol_ratio = indicators.volume_ma5[latest_idx]
+            let vol_ratio = volume_ma(indicators, latest_idx, 5)
                 .map(|value| latest_volume / value.max(1e-6))
                 .unwrap_or(0.0);
 

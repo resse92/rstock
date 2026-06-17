@@ -11,9 +11,9 @@
 
 use serde_json::json;
 
+use super::common::volume_ma;
 use super::common::{linear_regression_metrics, pct_change, signal};
 use super::PatternDetector;
-use crate::patterns::indicators::SeriesIndicators;
 use crate::patterns::model::{BarSeries, PatternSignal};
 
 #[derive(Debug, Clone, Default)]
@@ -24,7 +24,11 @@ impl PatternDetector for TrendAccelerationInflectionDetector {
         "trend_acceleration_inflection"
     }
 
-    fn detect(&self, series: &BarSeries, indicators: &SeriesIndicators) -> Option<PatternSignal> {
+    fn detect(
+        &self,
+        series: &BarSeries,
+        indicators: &polars::prelude::DataFrame,
+    ) -> Option<PatternSignal> {
         if series.len() < 50 {
             return None;
         }
@@ -38,7 +42,7 @@ impl PatternDetector for TrendAccelerationInflectionDetector {
         let latest_idx = series.len() - 1;
         for surge_idx in (series.len().saturating_sub(5)..=latest_idx).rev() {
             let change = pct_change(series, surge_idx)?;
-            let vol_ma = indicators.volume_ma5[surge_idx]?;
+            let vol_ma = volume_ma(indicators, surge_idx, 5)?;
             let surge_open = series.open_at(surge_idx)?;
             let surge_volume = series.volume_at(surge_idx)?;
             let surge_time = series.time_at(surge_idx)?;

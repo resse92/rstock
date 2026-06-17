@@ -11,9 +11,9 @@
 
 use serde_json::json;
 
+use super::common::volume_ma;
 use super::common::{is_bearish, is_bullish, pct_change, signal};
 use super::PatternDetector;
-use crate::patterns::indicators::SeriesIndicators;
 use crate::patterns::model::{BarSeries, PatternSignal};
 
 #[derive(Debug, Clone, Default)]
@@ -24,7 +24,11 @@ impl PatternDetector for StrongWashWeakToStrongDetector {
         "strong_wash_weak_to_strong"
     }
 
-    fn detect(&self, series: &BarSeries, indicators: &SeriesIndicators) -> Option<PatternSignal> {
+    fn detect(
+        &self,
+        series: &BarSeries,
+        indicators: &polars::prelude::DataFrame,
+    ) -> Option<PatternSignal> {
         if series.len() < 10 {
             return None;
         }
@@ -32,7 +36,7 @@ impl PatternDetector for StrongWashWeakToStrongDetector {
         let latest_idx = end - 1;
         for big_idx in (end.saturating_sub(6)..end.saturating_sub(2)).rev() {
             let big_change = pct_change(series, big_idx)?;
-            let big_vol_ma = indicators.volume_ma5[big_idx]?;
+            let big_vol_ma = volume_ma(indicators, big_idx, 5)?;
             let big_close = series.close_at(big_idx)?;
             let big_volume = series.volume_at(big_idx)?;
             let big_time = series.time_at(big_idx)?;

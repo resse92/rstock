@@ -14,12 +14,13 @@ pub mod trend_resonance_reversal;
 pub mod trend_start;
 pub mod w_bottom;
 
-use crate::patterns::indicators::SeriesIndicators;
+use polars::prelude::DataFrame;
+
 use crate::patterns::model::{BarSeries, PatternSignal};
 
 pub trait PatternDetector: Send + Sync {
     fn id(&self) -> &'static str;
-    fn detect(&self, series: &BarSeries, indicators: &SeriesIndicators) -> Option<PatternSignal>;
+    fn detect(&self, series: &BarSeries, indicators: &DataFrame) -> Option<PatternSignal>;
 }
 
 pub use bottom_trend_inflection::BottomTrendInflectionDetector;

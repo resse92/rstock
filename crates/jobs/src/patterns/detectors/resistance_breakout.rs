@@ -12,8 +12,8 @@
 use serde_json::json;
 
 use super::common::{is_bullish, latest_idx, signal};
+use super::common::{ma, volume_ma};
 use super::PatternDetector;
-use crate::patterns::indicators::SeriesIndicators;
 use crate::patterns::model::{BarSeries, PatternSignal};
 
 #[derive(Debug, Clone)]
@@ -46,7 +46,11 @@ impl PatternDetector for ResistanceBreakoutDetector {
         "resistance_breakout"
     }
 
-    fn detect(&self, series: &BarSeries, indicators: &SeriesIndicators) -> Option<PatternSignal> {
+    fn detect(
+        &self,
+        series: &BarSeries,
+        indicators: &polars::prelude::DataFrame,
+    ) -> Option<PatternSignal> {
         if series.len() <= self.breakout_lookback + 1 {
             return None;
         }
@@ -54,9 +58,9 @@ impl PatternDetector for ResistanceBreakoutDetector {
         let latest_idx = latest_idx(series);
         let latest_close = series.close_at(latest_idx)?;
         let latest_time = series.time_at(latest_idx)?;
-        let ma5 = indicators.ma5[latest_idx]?;
-        let ma10 = indicators.ma10[latest_idx]?;
-        let ma20 = indicators.ma20[latest_idx]?;
+        let ma5 = ma(indicators, latest_idx, 5)?;
+        let ma10 = ma(indicators, latest_idx, 10)?;
+        let ma20 = ma(indicators, latest_idx, 20)?;
         if !(ma5 > ma10 && ma10 > ma20) {
             return None;
         }
@@ -81,10 +85,10 @@ impl PatternDetector for ResistanceBreakoutDetector {
                 resistance = resistance.max(series.high_at(probe)?);
             }
             let vol_ma = match self.volume_ma_period {
-                5 => indicators.volume_ma5[idx],
-                10 => indicators.volume_ma10[idx],
-                60 => indicators.volume_ma60[idx],
-                _ => indicators.volume_ma5[idx],
+                5 => volume_ma(indicators, idx, 5),
+                10 => volume_ma(indicators, idx, 10),
+                60 => volume_ma(indicators, idx, 60),
+                _ => volume_ma(indicators, idx, 5),
             }?;
             if change_pct < self.min_change_pct
                 || current_close < resistance * (1.0 + self.breakout_ratio)

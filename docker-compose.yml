@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        RELEASE_TAG: ${RELEASE_TAG:-}
     image: rstock:latest
     container_name: rstock-axum
     restart: unless-stopped

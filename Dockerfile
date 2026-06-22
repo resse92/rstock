@@ -1,14 +1,22 @@
-FROM rust:1.89-bookworm AS builder
+FROM debian:bookworm-slim AS downloader
 
 WORKDIR /app
 
-COPY Cargo.toml Cargo.lock ./
-COPY src ./src
-COPY crates ./crates
-COPY tools ./tools
-COPY vendor ./vendor
+ARG RELEASE_TAG
+ARG GITHUB_REPOSITORY=resse92/rstock
+ARG BIN_NAME=rstock
 
-RUN cargo build --release --bin rstock
+RUN test -n "$RELEASE_TAG"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL \
+        "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${BIN_NAME}-${RELEASE_TAG}-linux-x86_64.tar.gz" \
+        -o release.tar.gz \
+    && tar -xzf release.tar.gz \
+    && chmod +x "$BIN_NAME"
 
 FROM debian:bookworm-slim
 
@@ -18,7 +26,7 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/rstock /usr/local/bin/rstock
+COPY --from=downloader /app/rstock /usr/local/bin/rstock
 COPY config.example.toml /app/config.example.toml
 
 EXPOSE 8080

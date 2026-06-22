@@ -17,7 +17,7 @@ use jobs::patterns::{
 };
 use jobs::utils::load_stock_codes_from_file;
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use super::app::{cleanup_market_scan_jobs, AppState, MarketScanJob, MarketScanJobStatus};
 use super::errors::ApiError;
@@ -599,6 +599,14 @@ async fn fail_market_scan_job(state: &AppState, job_id: &str, error: String) {
     let mut notify_payload = None;
     let mut jobs = state.market_scan_jobs.lock().await;
     if let Some(job) = jobs.get_mut(job_id) {
+        error!(
+            target: "rstock::patterns",
+            job_id = %job_id,
+            pattern_id = %job.pattern_id,
+            trade_date = %job.trade_date,
+            error = %error,
+            "market scan job failed"
+        );
         job.status = MarketScanJobStatus::Failed;
         job.error = Some(error);
         job.finished_at = Some(Utc::now());
@@ -687,12 +695,25 @@ async fn discover_market_symbols(state: &AppState) -> Result<Vec<String>> {
         return load_stock_codes_from_file(path);
     }
 
+    let started_at = std::time::Instant::now();
+    info!(
+        target: "rstock::patterns",
+        timeout_secs = state.args.timeout,
+        "discover market symbols from qmt"
+    );
     let api = ApiClient::new(
         state.args.base_url.clone(),
         state.args.authorization.clone(),
         std::time::Duration::from_secs(state.args.timeout),
     )?;
-    api.discover_all_stock_codes().await
+    let symbols = api.discover_all_stock_codes().await?;
+    info!(
+        target: "rstock::patterns",
+        resolved_symbols = symbols.len(),
+        discover_market_symbols_ms = started_at.elapsed().as_millis(),
+        "discovered market symbols from qmt"
+    );
+    Ok(symbols)
 }
 
 fn parse_request_date(input: &str) -> Result<NaiveDate> {

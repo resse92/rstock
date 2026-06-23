@@ -5,4 +5,9 @@ temp
 data
 meta
 .codex
+.env
+.opencode
+.venv
+KHunter/.venv
+node_modules
 **/*.log

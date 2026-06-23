@@ -31,4 +31,4 @@ COPY config.example.toml /app/config.example.toml
 
 EXPOSE 8080
 
-CMD ["rstock"]
+CMD ["rstock", "--config", "/app/config.toml"]

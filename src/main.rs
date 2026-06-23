@@ -1,17 +1,11 @@
 use anyhow::Result;
 use rstock::server::{run_server, ServerConfig};
+use rstock::telemetry::init_logging;
 use std::path::PathBuf;
-use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,rstock=info,rstock_jobs=info")),
-        )
-        .with_target(true)
-        .init();
+    init_logging();
     let config_path = config_path()?;
     tracing::info!(config_path = %config_path.display(), "loading server config");
     run_server(ServerConfig::from_file(config_path)?).await

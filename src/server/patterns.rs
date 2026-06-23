@@ -17,6 +17,7 @@ use jobs::patterns::{
 };
 use jobs::utils::load_stock_codes_from_file;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tracing::{error, info, warn};
 
 use super::app::{cleanup_market_scan_jobs, AppState, MarketScanJob, MarketScanJobStatus};
@@ -86,6 +87,14 @@ pub struct PatternMarketResponse {
     pub signal_count: usize,
     pub fetched_symbols: usize,
     pub failed_symbols: Vec<PatternScanFailure>,
+    pub signals: Vec<PatternSignal>,
+    pub pattern_results: Vec<PatternGroupedResult>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PatternGroupedResult {
+    pub pattern_id: String,
+    pub signal_count: usize,
     pub signals: Vec<PatternSignal>,
 }
 
@@ -668,6 +677,7 @@ fn pattern_market_response(
     trade_date: NaiveDate,
     report: PatternScanReport,
 ) -> PatternMarketResponse {
+    let pattern_results = grouped_pattern_results(&pattern_id, &report.signals);
     PatternMarketResponse {
         pattern_id,
         trade_date: trade_date.format("%Y-%m-%d").to_string(),
@@ -678,7 +688,39 @@ fn pattern_market_response(
         fetched_symbols: report.fetched_symbols.len(),
         failed_symbols: report.failed_symbols,
         signals: report.signals,
+        pattern_results,
     }
+}
+
+fn grouped_pattern_results(
+    pattern_id: &str,
+    signals: &[PatternSignal],
+) -> Vec<PatternGroupedResult> {
+    let mut grouped = signals.iter().fold(
+        HashMap::<String, Vec<PatternSignal>>::new(),
+        |mut grouped, signal| {
+            grouped
+                .entry(signal.pattern_id.clone())
+                .or_default()
+                .push(signal.clone());
+            grouped
+        },
+    );
+    let ids = if pattern_id == "all" {
+        available_pattern_ids()
+    } else {
+        vec![pattern_id.to_string()]
+    };
+    ids.into_iter()
+        .map(|pattern_id| {
+            let signals = grouped.remove(&pattern_id).unwrap_or_default();
+            PatternGroupedResult {
+                pattern_id,
+                signal_count: signals.len(),
+                signals,
+            }
+        })
+        .collect()
 }
 
 fn market_scan_job_status_label(status: MarketScanJobStatus) -> &'static str {

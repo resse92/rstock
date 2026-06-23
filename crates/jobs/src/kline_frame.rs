@@ -29,13 +29,51 @@ pub fn empty_kline_frame() -> Result<DataFrame> {
 
 pub fn concat_frames(frames: Vec<DataFrame>) -> Result<DataFrame> {
     let mut iter = frames.into_iter();
-    let Some(mut out) = iter.next() else {
+    let Some(first) = iter.next() else {
         return empty_kline_frame();
     };
+    let mut out = normalize_kline_frame_schema(first)?;
     for frame in iter {
+        let frame = normalize_kline_frame_schema(frame)?;
         out.vstack_mut(&frame)?;
     }
     Ok(out)
+}
+
+pub fn normalize_kline_frame_schema(mut frame: DataFrame) -> Result<DataFrame> {
+    for name in [
+        "symbol",
+        "exchange",
+        "period",
+        "time",
+        "trade_date",
+        "source",
+    ] {
+        cast_column_if_present(&mut frame, name, &DataType::String)?;
+    }
+    for name in [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "turnover_rate",
+        "factor",
+    ] {
+        cast_column_if_present(&mut frame, name, &DataType::Float64)?;
+    }
+    Ok(frame)
+}
+
+fn cast_column_if_present(frame: &mut DataFrame, name: &str, dtype: &DataType) -> Result<()> {
+    if frame.column(name).is_err() {
+        return Ok(());
+    }
+    let mut column = frame.column(name)?.cast(dtype)?;
+    column.rename(name.into());
+    frame.with_column(column)?;
+    Ok(())
 }
 
 pub fn frame_symbols(frame: &DataFrame) -> Result<BTreeSet<String>> {
@@ -204,7 +242,7 @@ pub fn qmt_kline_response_to_frame(
             high.push(bar.high);
             low.push(bar.low);
             close.push(bar.close);
-            volume.push(bar.volume);
+            volume.push(bar.volume as f64);
             amount.push(bar.amount);
             turnover_rate.push(None);
             factor.push(1.0);
@@ -540,5 +578,62 @@ fn format_time_ms(period: &str, time_ms: i64) -> String {
         }
     } else {
         time_ms.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use polars::df;
+
+    use super::concat_frames;
+
+    #[test]
+    fn concat_frames_normalizes_int64_volume_to_float64() {
+        let qmt_like = df!(
+            "symbol" => ["000001.SH"],
+            "exchange" => ["SH"],
+            "period" => ["1d"],
+            "time" => ["2026-06-22"],
+            "trade_date" => ["2026-06-22"],
+            "open" => [10.0],
+            "high" => [10.5],
+            "low" => [9.8],
+            "close" => [10.2],
+            "volume" => [100_i64],
+            "amount" => [1000.0],
+            "turnover_rate" => [None::<f64>],
+            "factor" => [1.0],
+            "source" => ["qmt"]
+        )
+        .unwrap();
+        let tdx_like = df!(
+            "symbol" => ["600000.SH"],
+            "exchange" => ["SH"],
+            "period" => ["1d"],
+            "time" => ["2026-06-22"],
+            "trade_date" => ["2026-06-22"],
+            "open" => [11.0],
+            "high" => [11.5],
+            "low" => [10.8],
+            "close" => [11.2],
+            "volume" => [200.0],
+            "amount" => [2000.0],
+            "turnover_rate" => [None::<f64>],
+            "factor" => [1.0],
+            "source" => ["tdx"]
+        )
+        .unwrap();
+
+        let frame = concat_frames(vec![qmt_like, tdx_like]).unwrap();
+
+        assert_eq!(frame.height(), 2);
+        assert_eq!(
+            frame.column("volume").unwrap().f64().unwrap().get(0),
+            Some(100.0)
+        );
+        assert_eq!(
+            frame.column("volume").unwrap().f64().unwrap().get(1),
+            Some(200.0)
+        );
     }
 }

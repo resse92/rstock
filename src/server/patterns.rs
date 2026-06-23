@@ -17,11 +17,12 @@ use jobs::patterns::{
 };
 use jobs::utils::load_stock_codes_from_file;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use tracing::{error, info, warn};
 
 use super::app::{cleanup_market_scan_jobs, AppState, MarketScanJob, MarketScanJobStatus};
 use super::errors::ApiError;
+use super::feishu::FeishuPostMessage;
 
 #[derive(Debug, Deserialize)]
 pub struct PatternSingleRequest {
@@ -803,13 +804,25 @@ fn available_pattern_ids() -> Vec<String> {
     ids
 }
 
-fn dispatch_feishu_report(state: AppState, message: String) {
+fn dispatch_feishu_report(state: AppState, message: FeishuPostMessage) {
     if !state.feishu.is_enabled() {
+        info!(
+            target: "rstock::patterns",
+            message_title = %message.title(),
+            line_count = message.line_count(),
+            "skip feishu report because bot token is not configured"
+        );
         return;
     }
 
+    info!(
+        target: "rstock::patterns",
+        message_title = %message.title(),
+        line_count = message.line_count(),
+        "dispatch feishu report"
+    );
     tokio::spawn(async move {
-        if let Err(err) = state.feishu.send_text(message).await {
+        if let Err(err) = state.feishu.send_post(message).await {
             warn!(target: "rstock::patterns", error = %err, "send feishu report failed");
         }
     });
@@ -819,27 +832,25 @@ fn render_check_all_feishu_message(
     symbol: &str,
     trade_date: NaiveDate,
     report: &PatternScanReport,
-) -> String {
+) -> FeishuPostMessage {
     let mut lines = vec![
-        "Pattern Check-All Finished".to_string(),
+        "Status: Succeeded".to_string(),
         format!("Trade Date: {}", trade_date.format("%Y-%m-%d")),
         format!("Symbol: {symbol}"),
-        format!(
-            "Summary: matched {} patterns, skipped {} short series, failed {} symbols",
-            report.signal_count,
-            report.skipped_short_series,
-            report.failed_symbols.len()
-        ),
+        format!("Matched Patterns: {}", report.signal_count),
+        format!("Skipped Short Series: {}", report.skipped_short_series),
+        format!("Failed Symbols: {}", report.failed_symbols.len()),
         String::new(),
     ];
+    append_pattern_summary_section(&mut lines, &report.signals);
     append_signal_section(
         &mut lines,
-        "Matched Patterns",
+        "Matched Details",
         &report.signals,
         FEISHU_SIGNAL_LIMIT,
     );
     append_failure_section(&mut lines, &report.failed_symbols, FEISHU_FAILURE_LIMIT);
-    lines.join("\n")
+    FeishuPostMessage::new("Pattern Check-All Finished", lines)
 }
 
 fn render_market_scan_feishu_message(
@@ -847,44 +858,53 @@ fn render_market_scan_feishu_message(
     pattern_id: &str,
     trade_date: NaiveDate,
     report: &PatternScanReport,
-) -> String {
+) -> FeishuPostMessage {
     let mut lines = vec![
-        "Pattern Market Scan Finished".to_string(),
+        "Status: Succeeded".to_string(),
         format!("Job ID: {job_id}"),
         format!("Trade Date: {}", trade_date.format("%Y-%m-%d")),
         format!("Pattern: {pattern_id}"),
-        format!(
-            "Summary: requested {}, completed {}, matched {}, fetched {}, failed {}",
-            report.requested_symbols,
-            report.requested_symbols,
-            report.signal_count,
-            report.fetched_symbols.len(),
-            report.failed_symbols.len()
-        ),
+        format!("Requested Symbols: {}", report.requested_symbols),
+        format!("Completed Symbols: {}", report.requested_symbols),
+        format!("Fetched Symbols: {}", report.fetched_symbols.len()),
+        format!("Matched Signals: {}", report.signal_count),
+        format!("Failed Symbols: {}", report.failed_symbols.len()),
         format!("Skipped Short Series: {}", report.skipped_short_series),
         String::new(),
     ];
+    if pattern_id == "all" {
+        append_pattern_summary_section(&mut lines, &report.signals);
+    }
     append_signal_section(
         &mut lines,
-        "Matched Signals",
+        "Matched Details",
         &report.signals,
         FEISHU_SIGNAL_LIMIT,
     );
     append_failure_section(&mut lines, &report.failed_symbols, FEISHU_FAILURE_LIMIT);
-    lines.join("\n")
+    FeishuPostMessage::new("Pattern Market Scan Finished", lines)
 }
 
-fn render_market_scan_failed_feishu_message(job: &MarketScanJob) -> String {
+fn render_market_scan_failed_feishu_message(job: &MarketScanJob) -> FeishuPostMessage {
     let mut lines = vec![
-        "Pattern Market Scan Failed".to_string(),
+        "Status: Failed".to_string(),
         format!("Job ID: {}", job.job_id),
         format!("Trade Date: {}", job.trade_date.format("%Y-%m-%d")),
         format!("Pattern: {}", job.pattern_id),
         format!("Requested Symbols: {}", job.requested_symbols),
         format!("Completed Symbols: {}", job.completed_symbols),
+        format!("Resolved Symbols: {}", job.resolved_symbols),
+        format!(
+            "Progress: series {}, matched {}, skipped {}, failed {}",
+            job.series_count,
+            job.signal_count,
+            job.skipped_short_series,
+            job.failed_symbols.len()
+        ),
     ];
 
     if let Some(error) = job.error.as_ref() {
+        lines.push(String::new());
         lines.push(format!("Error: {}", flatten_text(error)));
     }
 
@@ -893,7 +913,25 @@ fn render_market_scan_failed_feishu_message(job: &MarketScanJob) -> String {
         append_failure_section(&mut lines, &job.failed_symbols, FEISHU_FAILURE_LIMIT);
     }
 
-    lines.join("\n")
+    FeishuPostMessage::new("Pattern Market Scan Failed", lines)
+}
+
+fn append_pattern_summary_section(lines: &mut Vec<String>, signals: &[PatternSignal]) {
+    lines.push("Pattern Summary:".to_string());
+    if signals.is_empty() {
+        lines.push("- None".to_string());
+        lines.push(String::new());
+        return;
+    }
+
+    let mut counts = BTreeMap::<String, usize>::new();
+    for signal in signals {
+        *counts.entry(signal.pattern_id.clone()).or_default() += 1;
+    }
+    for (pattern_id, count) in counts {
+        lines.push(format!("- {pattern_id}: {count}"));
+    }
+    lines.push(String::new());
 }
 
 fn append_signal_section(

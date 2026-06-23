@@ -65,7 +65,7 @@ impl ServerConfig {
             s3_host: Some(config.s3.host),
             pattern_adjust_type: config.patterns.adjust_type,
             pattern_tdx_fallback: config.patterns.tdx_fallback,
-            feishu_bot_token: empty_to_none(std::env::var("FEISHU_BOT_TOKEN").ok()),
+            feishu_bot_token: empty_to_none(config.feishu.bot_token),
         })
     }
 }
@@ -95,6 +95,8 @@ struct RootConfig {
     sync: SyncSection,
     #[serde(default)]
     patterns: PatternSection,
+    #[serde(default)]
+    feishu: FeishuSection,
 }
 
 #[derive(Debug, Deserialize)]
@@ -214,6 +216,11 @@ impl Default for PatternSection {
             tdx_fallback: default_pattern_tdx_fallback(),
         }
     }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct FeishuSection {
+    bot_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

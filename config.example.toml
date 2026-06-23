@@ -33,6 +33,9 @@ fetch_concurrency = 4
 adjust_type = "qfq"
 tdx_fallback = true
 
+[feishu]
+bot_token = ""
+
 [tools.minute_s3]
 part_size = 200000
 upload_concurrency = 4
